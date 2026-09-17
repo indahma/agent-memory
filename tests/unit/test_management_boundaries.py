@@ -1,5 +1,6 @@
 import pytest
 from agent_memory.core.errors import ValidationError
+from agent_memory.core.search_index import SearchIndex
 
 
 def memory(store, name="old-memory", **kwargs):
@@ -36,7 +37,26 @@ def test_existing_historical_links_survive_other_metadata_updates(store):
     store.delete(target.name)
     updated = store.correct(source.name, abstract="Updated quasar wording")
     assert updated.links == [target.name]
+    before = source.path.read_bytes()
+    with pytest.raises(ValidationError):
+        store.correct(source.name, links=[target.name])
+    assert source.path.read_bytes() == before
     assert store.correct(source.name, links=[]).links == []
+
+
+def test_explicit_replacement_rejects_duplicate_links_without_partial_write(store):
+    memory(store, "source")
+    memory(store, "target")
+    source = store.find("source")
+    before = source.path.read_bytes()
+    with store._database.connect() as connection:
+        indexed_before = SearchIndex(connection).row("source")["links"]
+    with pytest.raises(ValidationError):
+        store.correct("source", links=["target", "target"])
+    assert source.path.read_bytes() == before
+    with store._database.connect() as connection:
+        assert SearchIndex(connection).row("source")["links"] == indexed_before
+    assert store.correct("source", links=["target"]).links == ["target"]
 
 
 def test_unlink_does_not_delete_target_or_evidence(store):

@@ -51,7 +51,8 @@ such as `project` or `topic` name the subdirectory; pick an existing one, and pa
 Use `mem record --link <target>` for links to existing active memories. To revise links,
 `mem correct <name> --link <target>` replaces the complete list; repeat `--link` for each
 retained target. MCP `memory_correct` accepts `links`, with `[]` clearing the list. Choose
-another active memory in this store as each new target. Existing historical links may stay.
+another active memory in this store as each target. Use `mem correct <name> --clear-links`
+to remove all links. Existing historical links may stay when links are omitted.
 Use these commands for changes so validation and indexing run together.
 
 ## Write discipline

@@ -13,7 +13,7 @@ Paths beginning with `core/` refer to `packages/core/src/agent_memory/core/`.
 | Patch | reconcile.OP_ALIASES maps patch to update | No separate patch API |
 | Correct | CLI correct, MCP memory_correct -> Store.correct | Active source/successor and link validation under writer lock; replacement lacks guaranteed preimages |
 | Link | record/correct; Manage._add_cooccurrence_links is existing deterministic T0 | MCP correct now exposes links; new targets must be distinct active memories in this store |
-| Unlink | No standalone CLI/MCP/Manage verb | correct replaces full list; core/MCP links=[] clears; CLI repeats --link for retained targets. Target and Raw retained; previous set needs Git/caller knowledge |
+| Unlink | No standalone CLI/MCP/Manage verb | correct replaces full list; MCP links=[] and CLI --clear-links clear it. Target and Raw retained; previous set needs Git/caller knowledge |
 | Supersede | record/correct, Manage proposals/exact duplicates | Invalid correct successor rejected; existing predecessor checks retained |
 | Merge | Manage._review -> decide -> _merge, CLI decide | Existing proposal revalidation and per-kind sleep caps retained; multi-file partial failure and loss of distinctions remain possible |
 | Split | Manage._split through existing proposals | Unchanged; rewrites original with first part without unconditional snapshot |
@@ -28,15 +28,16 @@ Paths beginning with `core/` refer to `packages/core/src/agent_memory/core/`.
 
 ## Implemented checks
 
-`Store._validate_links` compares against persisted links and validates only newly added
-relations. Missing, self and invalid targets fail before mutation. Existing historical
-links can remain during unrelated updates. Names resolve within one configured store;
+Implicitly retained links are not revalidated. Explicit replacement validates every submitted
+target and rejects duplicates, including previously stored targets that later became invalid.
+Missing, self and invalid targets fail before mutation. Existing historical links can remain
+during unrelated updates. Names resolve within one configured store;
 Recall scope is only a search filter, not authorization. Store.write checks that the
 source path belongs to this store. MCP rejects malformed arrays instead of clearing links.
 Missing correction sources/successors retain explicit NotFoundError behavior.
 
-Store.correct and Store.write validate/persist under the existing writer lock. Correction
-reads after locking and validates before appending provenance. This reduces stale updates
+Store.correct and Store.write share one locked persistence path. Correction reads after locking
+and validates before appending provenance. This prevents stale correction updates
 and evidence side effects; a whole Manage sleep remains nontransactional. Automatic
 cooccurrence linking remains enabled. No link/unlink delta command is added.
 

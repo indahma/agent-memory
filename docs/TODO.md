@@ -8,3 +8,5 @@
   bounds are needed; current correct replaces the complete list.
 - Correct explicit feedback persistence: Store.feedback currently returns an adjusted object
   without writing the weight back to disk.
+- Track stale Manage rewrites separately from correction serialization: Manage may prepare a
+  record before another writer changes it, then pass that old object to Store.write. See #16.

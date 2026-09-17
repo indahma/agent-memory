@@ -204,7 +204,7 @@ class Store:
             self._enforce_update_only(existing, candidate)
         record_module.validate(candidate, self.config, schema)
         record_module.canonicalise_dates(candidate)
-        self._validate_links(candidate, existing)
+        self._validate_links(candidate, existing, replace_links=spec.get("links") is not None)
         predecessor = self._predecessor(candidate, supersedes)
 
         for excerpt in _as_sequence(spec.get("provenance")):
@@ -329,12 +329,9 @@ class Store:
             if valid_from is not None:
                 current.valid_from = valid_from
             current.updated = now
-            self._validate_write(current)
-            for excerpt in provenance or []:
-                current.provenance.append(self._store_provenance(current.name, excerpt))
-            current.path.write_text(current.to_text(), encoding="utf-8")
-            self._project()
-            return current
+            return self._write_locked(
+                current, replace_links=links is not None, provenance=provenance
+            )
 
     def delete(self, name: str) -> MemoryRecord:
         """Marks the record invalid. The file stays; physical removal is a human command."""
@@ -363,22 +360,39 @@ class Store:
     def write(self, record: MemoryRecord) -> MemoryRecord:
         """Validate, persist, reproject. Agent writes and Manage rewrites share this path."""
         with store_lock(self.layout):
-            self._validate_write(record)
-            assert record.path is not None
-            record.path.write_text(record.to_text(), encoding="utf-8")
-            self._project()
+            return self._write_locked(record)
+
+    def _write_locked(
+        self,
+        record: MemoryRecord,
+        *,
+        replace_links: bool = False,
+        provenance: list[str] | None = None,
+    ) -> MemoryRecord:
+        self._validate_write(record, replace_links=replace_links)
+        for excerpt in provenance or []:
+            record.provenance.append(self._store_provenance(record.name, excerpt))
+        assert record.path is not None
+        record.path.write_text(record.to_text(), encoding="utf-8")
+        self._project()
         return record
 
-    def _validate_write(self, record: MemoryRecord) -> None:
+    def _validate_write(self, record: MemoryRecord, *, replace_links: bool = False) -> None:
         if record.path is None or self.layout.type_of(record.path) != record.type:
             raise ValidationError([FieldError("path", "memory must belong to this store")])
         record_module.validate(record, self.config, self.schemas.get(record.type))
         record_module.canonicalise_dates(record)
-        self._validate_links(record, self.find(record.name))
+        self._validate_links(record, self.find(record.name), replace_links=replace_links)
 
-    def _validate_links(self, record: MemoryRecord, existing: MemoryRecord | None) -> None:
-        added = set(record.links) - set(existing.links if existing else [])
-        for name in sorted(added):
+    def _validate_links(
+        self, record: MemoryRecord, existing: MemoryRecord | None, *, replace_links: bool = False
+    ) -> None:
+        if replace_links and len(record.links) != len(set(record.links)):
+            raise ValidationError([FieldError("links", "duplicate target")])
+        names = set(record.links) if replace_links else set(record.links) - set(
+            existing.links if existing else []
+        )
+        for name in sorted(names):
             target = self.find(name)
             if name == record.name or target is None or not target.is_active():
                 raise ValidationError(
