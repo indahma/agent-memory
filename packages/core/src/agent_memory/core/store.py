@@ -95,6 +95,7 @@ class Store:
     ):
         self.root = resolve_store_root(root)
         self.config = config or Config.load(self.root)
+        self.config.validate_index()
         self.layout = StoreLayout(self.root, self.config)
         self.clock = clock or Clock()
         self.agent = agent

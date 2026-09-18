@@ -105,7 +105,8 @@ class Recall:
                 dense = VectorIndex(
                     connection, self._store.embedder, self._config.index.vector_model
                 ).match(query, pool, eligible_names=set(eligible))
-                candidates = fuse_candidates(candidates, dense, pool)
+                if dense:
+                    candidates = fuse_candidates(candidates, dense, pool)
             hits = self._rank(candidates, eligible, as_of=as_of)
             if deep and self._config.recall.raw_enabled:
                 citations = self._citations(index.rows())

@@ -166,7 +166,14 @@ class Config:
                 if key not in known:
                     raise ValueError(f"unknown config knob: {section_name}.{key}")
                 setattr(section, key, value)
+        config.validate_index()
         return config
+
+    def validate_index(self) -> None:
+        if not isinstance(self.index.vector_enabled, bool):
+            raise ValueError("index.vector_enabled must be a boolean")
+        if not isinstance(self.index.vector_model, str) or not self.index.vector_model.strip():
+            raise ValueError("index.vector_model must be a non-empty string")
 
     def save(self, store_root: pathlib.Path) -> pathlib.Path:
         path = pathlib.Path(store_root) / CONFIG_FILENAME

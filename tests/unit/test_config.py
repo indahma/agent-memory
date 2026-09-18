@@ -82,6 +82,17 @@ def test_unknown_knob_is_rejected_rather_than_silently_ignored(tmp_path):
         Config.load(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "value, error",
+    [("'true'", "index.vector_enabled"), ("''", "index.vector_model")],
+)
+def test_invalid_vector_configuration_is_rejected(tmp_path, value, error):
+    knob = "vector_enabled" if "enabled" in error else "vector_model"
+    (tmp_path / CONFIG_FILENAME).write_text(f"[index]\n{knob} = {value}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=error):
+        Config.load(tmp_path)
+
+
 def _numeric_literals(path: pathlib.Path) -> list[tuple[int, object]]:
     """Inline numbers are magic. A named module-level constant is not."""
     tree = ast.parse(path.read_text(encoding="utf-8"))

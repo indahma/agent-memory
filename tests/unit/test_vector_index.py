@@ -112,6 +112,18 @@ def test_off_to_on_bootstraps_without_filesystem_changes(tmp_path, clock):
     assert "vehicle-upkeep" in [hit.name for hit in Recall(vector).recall("service the car")]
 
 
+def test_empty_vector_index_preserves_bm25_results(tmp_path, clock):
+    root = tmp_path / "store"
+    plain = Store(root, clock=clock)
+    plain.init()
+    plain.record(abstract="A plain lexical memory", type="decision", name="plain")
+    baseline = [hit.name for hit in Recall(plain).recall("plain lexical", log=False)]
+    vector, _ = _vector_store(root, clock)
+    with Database(vector.layout).connect() as connection:
+        assert not connection.execute("SELECT * FROM vector_chunks").fetchall()
+    assert [hit.name for hit in Recall(vector).recall("plain lexical", log=False)] == baseline
+
+
 def test_incremental_updates_offline_catchup_delete_and_model_change(tmp_path, clock):
     root = tmp_path / "store"
     store, embedder = _vector_store(root, clock)

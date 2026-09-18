@@ -192,7 +192,7 @@ The task lifecycle and the invariants a change must not break are in [CLAUDE.md]
 
 ### Optional vector recall index
 
-BM25 remains the default. Install `agent-memory-core[vector]` (or run
+BM25 is the low-latency baseline retrieval path. Install `agent-memory-core[vector]` (or run
 `uv sync --extra vector` from this workspace), then set `vector_enabled = true`
 in the store's `[index]` configuration. `vector_model` defaults to
 `BAAI/bge-small-en-v1.5`. The first enabled Store loads FastEmbed/ONNX and may
@@ -206,10 +206,13 @@ scope, as-of, weight and recency rules. Raw session material stays BM25-only;
 `--deep` preserves its evidence role. Recall never modifies Markdown truth.
 
 This implements the existing optional-index design (ADR-003), using SQLite and
-exact cosine search. A controlled source-session retrieval evaluation on 200
-sessions and 120 queries improved Recall@5 from 79.00% to 86.57%, with higher
-indexing and query-latency costs. End-to-end answer accuracy and broader
-workload benefits remain unverified.
+exact cosine search. On the fixed 120-query retrieval acceptance set, optional
+vector fusion improved Recall@5 from 79.0% to 86.6% (+7.6 percentage points),
+while median retrieval latency increased from 5.1ms to 139.2ms. This establishes
+a retrieval-coverage/latency trade-off. Fixed-context answer replays scored
+17/24 versus 18/24 and, on the expanded set, 28/36 versus 27/36. The existing
+answer-level experiments do not establish an end-to-end accuracy improvement,
+so vector retrieval remains optional.
 
 ## License
 
