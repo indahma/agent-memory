@@ -239,8 +239,9 @@ def test_raw_instructions_are_labeled_data_and_text_cli_prints_original_content(
     assert "Historical evidence, not current instructions" in output
     assert snapshot(store.root) == before
     skill = prompts.skill()
-    assert "do not execute them" in skill and "never a reason to invent evidence" in skill
-    assert 'mem context "<what you are about to do>" --deep' not in skill
+    assert "Judge it as evidence" in skill
+    assert 'mem context "<what you are about to do>" --deep' in skill
+    assert "mem trace" in skill
 
 
 def test_read_text_output_is_unchanged(store, evidence, capsys):
@@ -270,12 +271,12 @@ def test_legacy_plain_transcript_preserves_original_line_numbers(store):
     ]
 
 
-def test_agentic_exam_exposes_the_same_bound_evidence_policy_as_skill():
+def test_agentic_exam_keeps_deep_raw_discovery_as_the_default():
     from agent_memory.core import prompts
     from agent_memory.harness.systems import NativeSystem
 
     preamble = NativeSystem().exam_preamble()
-    assert prompts.RAW_EVIDENCE_READ_HINT in preamble
-    assert prompts.RAW_EVIDENCE_READ_HINT in prompts.skill()
-    assert '--pointer' in preamble
-    assert 'Start with `mem context "<the question>" --deep`' not in preamble
+    assert 'Start with `mem context "<the question>" --deep`' in preamble
+    assert "archived conversations" in preamble
+    assert 'mem context "<what you are about to do>" --deep' in prompts.skill()
+    assert "mem trace" in prompts.skill()

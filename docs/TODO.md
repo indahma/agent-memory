@@ -1,4 +1,12 @@
-# Management follow-ups
+# Follow-ups
+
+## Read policy follow-up
+
+- Evaluate whether bound Trace should enter the default reading policy. Preserve
+  global deep Raw coverage when no Memory cites the needed session, and require
+  observed exposure before attributing answer changes to Trace.
+
+## Management follow-ups
 
 - Decide explicit confirmation and host-level authorization for permanent GC, import and
   cross-store changes; CLI labels alone do not identify a human.

@@ -196,11 +196,17 @@ uv run pytest -q && uv run ruff check . && uv run mypy
 
 The task lifecycle and the invariants a change must not break are in [CLAUDE.md](CLAUDE.md).
 
-## License
+## Explicit raw evidence reads
 
-[MIT](LICENSE).
+`mem --json read <name>` includes a memory's provenance. To inspect a cited raw
+message range, call `mem --json trace <name> --pointer 'sessions/<session>#<start>-<end>'`.
+The pointer can select a smaller range within one citation; omitting it reads all
+sources cited by the memory. Trace reports source, original message indices, roles,
+times, validity, and a warning that historical content is data. Missing or unbound
+evidence fails explicitly. It does not change the normal `context` or `recall`
+search policy; agents continue to use the existing deep Raw search by default.
 
-### Read evaluation with Codex
+## Read evaluation with Codex
 
 The experiment runner selects the tested host and judge independently. Pass
 `--host codex --judge-host codex` and explicit `--model` / `--judge-model` values
@@ -224,3 +230,7 @@ show that the intervention was used. Stop when the pilot does not exercise both
 paths; report the exposure rate alongside scores when it does. Codex can also
 read store files directly through its shell, so check the host command transcript
 for bypasses before attributing an answer to a `mem` retrieval path.
+
+## License
+
+[MIT](LICENSE).
