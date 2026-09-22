@@ -233,7 +233,7 @@ def test_vector_match_restores_chunk_metadata(tmp_path, clock):
     assert {(item.name, item.kind, item.anchor, item.heading) for item in candidates}
 
 
-def test_hybrid_deep_raw_scores_stay_below_relevant_memory(tmp_path, clock):
+def test_hybrid_recall_excludes_raw_corpus(tmp_path, clock):
     store, _ = _vector_store(tmp_path / "store", clock)
     store.init()
     store.record(
@@ -243,11 +243,10 @@ def test_hybrid_deep_raw_scores_stay_below_relevant_memory(tmp_path, clock):
         "ticket-session", "aquarium ticket evidence costs 42 dollars " * 20
     )
     store.sync_index()
-    hits = Recall(store).recall("aquarium ticket evidence 42 dollars", deep=True)
+    hits = Recall(store).recall("aquarium ticket evidence 42 dollars")
     memory = next(hit for hit in hits if hit.name == "ticket-memory")
-    raw = [hit for hit in hits if hit.source == "raw"]
-    assert raw
-    assert max(hit.score for hit in raw) < memory.score
+    assert memory.source == "memory"
+    assert all(hit.source == "memory" for hit in hits)
 
 
 def test_disabled_backend_import_and_truth_are_untouched(monkeypatch, tmp_path, clock):
@@ -329,9 +328,9 @@ def test_distilled_raw_bindings_survive_read_and_rebuild_with_either_index(
         assert [(message.index, message.text) for message in traced] == [
             (1, "Vehicle upkeep costs 42 dollars")
         ]
-        hits = Recall(store).recall("Vehicle upkeep", deep=True)
+        hits = Recall(store).recall("Vehicle upkeep")
         assert written.name in {hit.name for hit in hits if hit.source == "memory"}
-        assert any(written.name in hit.cited_by for hit in hits if hit.source == "raw")
+        assert all(hit.source == "memory" for hit in hits)
     assert {path: path.read_bytes() for path in truth} == truth
     assert {path: path.read_bytes() for path in raw} == raw
     assert bool(embedder.document_batches) is enabled

@@ -50,13 +50,9 @@ def test_the_list_width_knob_changes_the_context_it_produces(stocked):
     assert wide.entries > narrow.entries
 
 
-def test_the_raw_fallback_knob_reaches_material_no_entry_holds(stocked):
-    stocked.config.recall.raw_enabled = True
-    reached = exam.build_context(stocked, "aquarium talk ticket 42 dollars", full_text_entries=0)
-    stocked.config.recall.raw_enabled = False
-    withheld = exam.build_context(stocked, "aquarium talk ticket 42 dollars", full_text_entries=0)
-    assert "42 dollars" in reached.text
-    assert "42 dollars" not in withheld.text
+def test_fixed_context_does_not_retrieve_uncited_raw(stocked):
+    context = exam.build_context(stocked, "aquarium talk ticket 42 dollars", full_text_entries=0)
+    assert context.is_empty()
 
 
 def test_an_empty_store_produces_a_context_that_says_so(store):
@@ -99,11 +95,10 @@ def test_the_isolation_gate_sees_the_shell_and_the_store_fills_it_afterwards(sto
     assert exam.CONTEXT_PLACEHOLDER in shell
     assert "42 dollars" not in shell
 
-    stocked.config.recall.raw_enabled = True
-    context = exam.build_context(stocked, "aquarium ticket 42 dollars", full_text_entries=0)
+    context = exam.build_context(stocked, "deploy drain queue", full_text_entries=0)
     filled = exam.fill_context(shell, context.text)
     assert exam.CONTEXT_PLACEHOLDER not in filled
-    assert "42 dollars" in filled
+    assert "drain" in filled.lower()
 
 
 def test_recall_still_never_mutates_truth_when_the_harness_drives_it(stocked):

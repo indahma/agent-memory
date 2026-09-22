@@ -97,7 +97,7 @@ def test_a_fact_dated_after_its_evidence_is_rejected(store, clock):
     assert "valid_from" in {error.field for error in raised.value.errors}
 
 
-def test_deep_hits_say_which_memories_already_cite_them(store):
+def test_memory_hits_keep_their_citations_without_raw_search(store):
     appended = store.archive.append_session("s6", LINES)
     store.record(
         type="event",
@@ -106,10 +106,10 @@ def test_deep_hits_say_which_memories_already_cite_them(store):
         provenance=[sessions.render_pointer(sessions.Pointer("s6", 1, 1))],
     )
     store.sync_index()
-    raw = [hit for hit in Recall(store).recall("Octopus Teacher", deep=True) if hit.source == "raw"]
-    assert raw
-    assert "octopus" in raw[0].cited_by
-    assert sessions.parse_pointer(raw[0].name).session == appended.session
+    hits = Recall(store).recall("Octopus Teacher")
+    assert hits[0].provenance == ("sessions/s6#1-1",)
+    assert store.trace(hits[0].name)[0].index == 1
+    assert appended.session == "s6"
 
 
 def test_capture_archives_the_increment_as_numbered_messages_and_returns_its_pointer(store):

@@ -36,15 +36,14 @@ class SearchIndex:
     def upsert(self, record: MemoryRecord, chunks: list[Chunk], relative_path: str) -> None:
         self.remove(record.name)
         self._connection.execute(
-            "INSERT INTO records(name, path, type, abstract, status, created, updated, "
+            "INSERT INTO records(name, path, type, abstract, created, updated, "
             "valid_from, invalid_at, superseded_by, weight, author, links, provenance) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.name,
                 relative_path,
                 record.type,
                 record.abstract,
-                record.status,
                 record.created,
                 record.updated,
                 record.valid_from or record.created,

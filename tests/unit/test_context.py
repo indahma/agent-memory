@@ -45,7 +45,7 @@ def test_reads_behind_the_context_do_not_mutate_truth(seeded):
     assert after == before
 
 
-def test_deep_context_reaches_raw_material(store):
+def test_context_only_reaches_memory(store):
     store.record(
         abstract="Watches nature documentaries",
         type="preference",
@@ -55,5 +55,4 @@ def test_deep_context_reaches_raw_material(store):
         "s1", "user: the follow-up you named was 'My Octopus Teacher' and it cost 42 dollars\n"
     )
     store.sync_index()
-    assert "Octopus" not in build(store, "My Octopus Teacher", deep=False).text
-    assert "Octopus" in build(store, "My Octopus Teacher", deep=True).text
+    assert "Octopus" not in build(store, "My Octopus Teacher").text

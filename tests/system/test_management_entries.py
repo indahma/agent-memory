@@ -29,9 +29,10 @@ def test_cli_and_mcp_share_relationship_boundaries(store, capsys):
     dispatch(store, "memory_correct", {"name": first["name"], "links": []})
     assert store.find(first["name"]).links == []
     assert store.read("quasar-new").text == "New fact"
-    for tool in ("memory_gc", "memory_delete", "memory_unlink"):
+    for tool in ("memory_gc", "memory_unlink"):
         with pytest.raises(ValidationError):
             dispatch(store, tool, {"name": first["name"]})
+    assert dispatch(store, "memory_delete", {"name": first["name"]})["invalid_at"]
 
 
 @pytest.mark.parametrize("links", ["target", None, [None], {}])

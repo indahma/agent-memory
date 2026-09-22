@@ -403,8 +403,7 @@ def test_reusing_a_store_that_was_never_written_is_an_error(tmp_path, suite):
 def test_an_arm_can_be_expressed_as_a_config_override(tmp_path):
     from agent_memory.harness.main import _configured
 
-    config = _configured(["recall.raw_enabled=false", "recall.default_limit=5"])
-    assert config.recall.raw_enabled is False
+    config = _configured(["recall.default_limit=5"])
     assert config.recall.default_limit == 5
     assert config.recall_fingerprint() != _configured([]).recall_fingerprint()
 

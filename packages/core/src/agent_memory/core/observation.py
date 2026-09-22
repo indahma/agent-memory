@@ -117,7 +117,6 @@ def invoke(handler, store, args):
             "query",
             "name",
             "level",
-            "deep",
             "limit",
             "scope",
             "as_of",

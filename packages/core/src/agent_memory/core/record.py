@@ -1,13 +1,9 @@
-"""One memory file = one invalidation atom (Invariant 7). This is its shape and its gate.
-
-A file is active or invalid, nothing in between, and invalidation comes only from
-replacement or deletion (ADR-009). The schema-declared fields of a memory ride in the same
-frontmatter as the core fields.
-"""
+"""One memory file = one validity interval. Old files remain available for history."""
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import pathlib
 
 from . import frontmatter, slug, timestamp
@@ -17,13 +13,11 @@ from .schema import MemorySchema
 
 STATUS_ACTIVE = "active"
 STATUS_INVALID = "invalid"
-STATUSES = (STATUS_ACTIVE, STATUS_INVALID)
 
 FIELD_ORDER = (
     "name",
     "abstract",
     "type",
-    "status",
     "created",
     "updated",
     "valid_from",
@@ -34,7 +28,7 @@ FIELD_ORDER = (
     "links",
     "provenance",
 )
-CORE_FIELDS = frozenset(FIELD_ORDER)
+CORE_FIELDS = frozenset(FIELD_ORDER) | {"status"}
 REQUIRED_FIELDS = ("name", "abstract", "type", "created", "updated", "author")
 DATE_FIELDS = ("created", "updated", "valid_from", "invalid_at")
 
@@ -48,7 +42,6 @@ class MemoryRecord:
     created: str
     updated: str
     body: str = ""
-    status: str = STATUS_ACTIVE
     valid_from: str | None = None
     invalid_at: str | None = None
     superseded_by: str | None = None
@@ -57,13 +50,13 @@ class MemoryRecord:
     provenance: list[str] = dataclasses.field(default_factory=list)
     fields: dict[str, str] = dataclasses.field(default_factory=dict)
     path: pathlib.Path | None = None
+    source_hash: str | None = dataclasses.field(default=None, repr=False, compare=False)
 
     def frontmatter_fields(self) -> dict[str, object]:
         core: dict[str, object] = {
             "name": self.name,
             "abstract": self.abstract,
             "type": self.type,
-            "status": self.status,
             "created": self.created,
             "updated": self.updated,
             "valid_from": self.valid_from or self.created,
@@ -83,7 +76,12 @@ class MemoryRecord:
         return frontmatter.render(self.frontmatter_fields(), self.body)
 
     def is_active(self) -> bool:
-        return self.status == STATUS_ACTIVE
+        return self.invalid_at is None
+
+    @property
+    def status(self) -> str:
+        """Compatibility view for callers; the interval is the sole stored state."""
+        return STATUS_ACTIVE if self.is_active() else STATUS_INVALID
 
     @classmethod
     def from_text(cls, text: str, path: pathlib.Path | None = None) -> MemoryRecord:
@@ -101,15 +99,18 @@ class MemoryRecord:
             created=str(raw.get("created") or ""),
             updated=str(raw.get("updated") or ""),
             body=body,
-            status=str(raw.get("status") or STATUS_ACTIVE),
             valid_from=_optional_str(raw.get("valid_from")),
-            invalid_at=_optional_str(raw.get("invalid_at")),
+            invalid_at=_optional_str(raw.get("invalid_at")) or (
+                _optional_str(raw.get("updated"))
+                if raw.get("status") in (STATUS_INVALID, "retired") else None
+            ),
             superseded_by=_optional_str(raw.get("superseded_by")),
             weight=_as_float(raw.get("weight")),
             links=_as_list(raw.get("links")),
             provenance=_as_list(raw.get("provenance")),
             fields=extra,
             path=path,
+            source_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
 
@@ -141,12 +142,8 @@ def validate(record: MemoryRecord, config: Config, schema: MemorySchema | None =
         if value and not timestamp.is_valid(str(value)):
             errors.append(FieldError(field, "must be an ISO 8601 day or zone-aware instant"))
 
-    if record.status not in STATUSES:
-        errors.append(FieldError("status", f"must be one of {', '.join(STATUSES)}"))
-    if record.status == STATUS_INVALID and not record.invalid_at:
-        errors.append(FieldError("invalid_at", "an invalid record records when it became so"))
-    if record.status == STATUS_ACTIVE and (record.invalid_at or record.superseded_by):
-        errors.append(FieldError("status", "an active record has no successor and no invalid_at"))
+    if record.superseded_by and not record.invalid_at:
+        errors.append(FieldError("invalid_at", "a successor requires an ended validity interval"))
     if record.superseded_by and not slug.is_valid_slug(record.superseded_by):
         errors.append(FieldError("superseded_by", "must be a slug"))
     if record.superseded_by == record.name and record.name:
@@ -170,8 +167,9 @@ def canonicalise_dates(record: MemoryRecord) -> None:
 
 def invalidate(record: MemoryRecord, at: str, successor: str | None = None) -> None:
     """The only way a record leaves the active set: replaced, or deleted."""
-    record.status = STATUS_INVALID
-    record.invalid_at = at
+    start = timestamp.parse(record.valid_from or record.created)
+    end = timestamp.parse(at)
+    record.invalid_at = timestamp.canonical(max(start, end).isoformat())
     record.superseded_by = successor
 
 

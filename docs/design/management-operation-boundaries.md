@@ -1,5 +1,13 @@
 # Management operation boundaries
 
+The presence of `invalid_at` ends a memory's current validity. Its retained file and
+`valid_from`/`invalid_at` interval serve historical queries; `superseded_by` records a
+replacement link. Old files with stored status remain readable, while new writes derive
+eligibility from the interval alone. Current indexes and MEMORY.md project only files
+whose interval has no end. Archived sessions and provenance are independent of this state.
+An in-place correction changes the file within its existing interval; creating a successor
+preserves distinct historical facts as separate files.
+
 Correction is a read-modify-write operation on a canonical memory file. Concurrent
 corrections can silently discard one another when either reads before acquiring the store's
 writer lock. A relationship mutation can also leave a memory pointing at a missing or
@@ -16,6 +24,9 @@ invalid. An explicit list replaces the complete set, validates every submitted t
 current rules, and may be empty to remove all relationships. CLI and MCP pass corrections to
 the same Store boundary.
 
-This change covers correction serialization, relationship replacement, and adapter parity.
-It does not add RBAC, approvals, standalone unlink, archive management, feedback redesign,
-retrieval changes, or a general rollback system.
+Agents may correct a named active memory, create a successor, replace an old memory with
+an existing active successor, merge named memories atomically, or delete a named memory
+through Store. Both adapters expose these explicit operations. Sleep retains proposal
+review and per-kind caps for unattended
+merge, split, supersede, and deletion decisions. File scope, links, provenance, locks,
+validation, and projection remain Core responsibilities.

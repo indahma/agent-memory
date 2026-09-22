@@ -15,9 +15,7 @@ from . import observation, timestamp
 from .access_log import KIND_RECALL, AccessEntry, AccessLog
 from .config import Config
 from .database import SURFACE_ACTIVE, SURFACE_HISTORY, Database
-from .raw_index import SOURCE_MEMORY, SOURCE_RAW, RawIndex
 from .search_index import LINK_SEPARATOR, Candidate, SearchIndex
-from .sessions import Pointer, parse_pointer
 from .store import Store
 from .vector_index import VectorIndex
 
@@ -65,7 +63,7 @@ class Hit:
     relevance: float
     recency: float
     score: float
-    source: str = SOURCE_MEMORY
+    source: str = "memory"
     provenance: tuple[str, ...] = ()
     cited_by: tuple[str, ...] = ()
 
@@ -87,13 +85,12 @@ class Recall:
         query: str,
         scope: str | None = None,
         as_of: str | None = None,
-        deep: bool = False,
         limit: int | None = None,
         log: bool = True,
     ) -> list[Hit]:
-        limit = limit or self._config.recall.default_limit
-        if deep:
-            limit *= self._config.recall.deep_limit_multiplier
+        limit = self._config.recall.default_limit if limit is None else limit
+        if limit < 1:
+            raise ValueError("limit must be positive")
         pool = limit * self._config.recall.candidate_pool_multiplier
         with self._database.connect() as connection:
             index = SearchIndex(connection)
@@ -109,13 +106,6 @@ class Recall:
                 if dense:
                     candidates = fuse_candidates(candidates, dense, pool)
             hits = self._rank(candidates, eligible, as_of=as_of)
-            if deep and self._config.recall.raw_enabled:
-                citations = self._citations(index.rows())
-                raw_hits = self._raw_hits(RawIndex(connection), query, pool, citations)
-                if self._config.index.vector_enabled:
-                    raw_hits = self._normalize_raw_hits(raw_hits, hits)
-                hits = hits + raw_hits
-                hits.sort(key=lambda hit: (-hit.score, hit.name))
             hits = hits[:limit]
             if not log:
                 return hits
@@ -132,7 +122,7 @@ class Recall:
                 ]
             )
         observation.emit(
-            "recall_return", query=query, deep=deep, scope=scope, as_of=as_of,
+            "recall_return", query=query, scope=scope, as_of=as_of,
             effective_limit=limit, hits=[hit.as_dict() for hit in hits],
         )
         return hits
@@ -198,7 +188,7 @@ class Recall:
                     heading=heading,
                     type=str(row["type"]),
                     updated=str(row["updated"]),
-                    status=str(row["status"]),
+                    status="invalid" if row["invalid_at"] else "active",
                     weight=weight,
                     relevance=relevance,
                     recency=recency,
@@ -210,63 +200,6 @@ class Recall:
             )
         hits.sort(key=lambda hit: (-hit.score, hit.name))
         return hits
-
-    def _citations(self, rows: list[sqlite3.Row]) -> list[tuple[Pointer, str]]:
-        cited: list[tuple[Pointer, str]] = []
-        for row in rows:
-            for item in str(row["provenance"]).split(LINK_SEPARATOR):
-                pointer = parse_pointer(item)
-                if pointer is not None:
-                    cited.append((pointer, str(row["name"])))
-        return cited
-
-    def _raw_hits(
-        self,
-        raw: RawIndex,
-        query: str,
-        pool: int,
-        citations: list[tuple[Pointer, str]],
-    ) -> list[Hit]:
-        """Evidence, not knowledge: no weight, no recency, and deliberately outranked."""
-        factor = self._config.recall.raw_relevance_factor
-        found: list[Hit] = []
-        for candidate in raw.match(query, pool):
-            excerpt = candidate.text.strip().replace("\n", " ")
-            pointer = parse_pointer(candidate.name)
-            cited_by = tuple(
-                sorted({name for cited, name in citations if pointer and cited.overlaps(pointer)})
-            )
-            found.append(
-                Hit(
-                    name=candidate.name,
-                    path=str(self._store.root / candidate.path),
-                    abstract=excerpt[: self._config.recall.snippet_max_chars],
-                    anchor=candidate.anchor,
-                    heading="",
-                    type=SOURCE_RAW,
-                    updated="",
-                    status="",
-                    weight=0.0,
-                    relevance=candidate.relevance,
-                    recency=0.0,
-                    score=candidate.relevance * factor,
-                    source=SOURCE_RAW,
-                    cited_by=cited_by,
-                )
-            )
-        return found
-
-    def _normalize_raw_hits(self, raw_hits: list[Hit], memory_hits: list[Hit]) -> list[Hit]:
-        """Keep hybrid RRF and raw BM25 on source-safe scales; raw remains evidence."""
-        if not raw_hits:
-            return raw_hits
-        raw_max = max(hit.relevance for hit in raw_hits) or 1.0
-        memory_scale = max((hit.score for hit in memory_hits), default=1.0)
-        factor = self._config.recall.raw_relevance_factor
-        return [
-            dataclasses.replace(hit, score=(hit.relevance / raw_max) * factor * memory_scale)
-            for hit in raw_hits
-        ]
 
     def _kind_weight(self, kind: str) -> float:
         from .chunking import KIND_ABSTRACT
