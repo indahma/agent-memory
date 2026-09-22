@@ -9,13 +9,15 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from . import chunking, memory_md, placement, timestamp
+from . import chunking, memory_md, observation, placement, timestamp
 from . import record as record_module
+from . import trace as trace_module
 from .access_log import KIND_READ, AccessEntry, AccessLog
 from .archive import Archive
 from .clock import Clock
 from .config import Config, resolve_store_root
 from .database import Database
+from .embeddings import Embedder, create_embedder
 from .errors import FieldError, NotFoundError, ValidationError
 from .indexer import Indexer, IndexReport
 from .locking import store_lock
@@ -90,15 +92,20 @@ class Store:
         config: Config | None = None,
         clock: Clock | None = None,
         agent: str = UNKNOWN_AGENT,
+        embedder: Embedder | None = None,
     ):
         self.root = resolve_store_root(root)
         self.config = config or Config.load(self.root)
+        self.config.validate_index()
         self.layout = StoreLayout(self.root, self.config)
         self.clock = clock or Clock()
         self.agent = agent
         self.archive = Archive(self.layout, self.clock)
         self.schemas = SchemaRegistry(self.layout)
-        self._indexer = Indexer(self.layout, self.clock)
+        if self.config.index.vector_enabled and embedder is None:
+            embedder = create_embedder(self.config.index.vector_model)
+        self.embedder = embedder
+        self._indexer = Indexer(self.layout, self.clock, embedder)
         self._database = Database(self.layout)
 
     def init(self) -> StoreLayout:
@@ -204,6 +211,7 @@ class Store:
             self._enforce_update_only(existing, candidate)
         record_module.validate(candidate, self.config, schema)
         record_module.canonicalise_dates(candidate)
+        self._validate_links(candidate, existing, replace_links=spec.get("links") is not None)
         predecessor = self._predecessor(candidate, supersedes)
 
         for excerpt in _as_sequence(spec.get("provenance")):
@@ -262,21 +270,28 @@ class Store:
                 [FieldError("valid_from", "later than the messages this memory cites")]
             )
 
-    def trace(self, name: str) -> list[Message]:
-        """Opens the messages a memory cites. The one read that reaches raw material by pointer."""
-        current = self.find(name)
+    def trace(self, name: str, pointer: str | None = None) -> list[Message]:
+        """Read cited messages without changing the store; legacy list return type."""
+        return [
+            message
+            for evidence in self.trace_evidence(name, pointer).evidence
+            for message in evidence.messages
+        ]
+
+    def trace_evidence(self, name: str, pointer: str | None = None) -> trace_module.TraceResult:
+        # find() opens/initializes SQLite. Trace must also work with a missing index and
+        # must not record access, so use the same truth-file fallback without the cache.
+        current = self._at(self._scan_for(name))
         if current is None:
             raise NotFoundError(f"no memory named {name}")
-        stamp = self.clock.now().isoformat()
-        self._log_access([AccessEntry(stamp, name, "", KIND_READ, self.agent)])
-        return self.trace_record(current)
+        return trace_module.read(self.layout, current, pointer)
 
     def trace_record(self, record: MemoryRecord) -> list[Message]:
         messages: list[Message] = []
         for item in record.provenance:
             pointer = parse_pointer(item)
             if pointer is not None:
-                messages.extend(resolve(self.layout, pointer))
+                messages.extend(resolve(self.layout, pointer, strict=False))
         return messages
 
     def _predecessor(self, candidate: MemoryRecord, supersedes: str | None) -> MemoryRecord | None:
@@ -301,28 +316,36 @@ class Store:
         valid_from: str | None = None,
         provenance: list[str] | None = None,
     ) -> MemoryRecord:
-        current = self.find(name)
-        if current is None or current.path is None:
-            raise NotFoundError(f"no memory named {name}")
-        now = self.clock.timestamp()
-        if supersede_with:
-            successor = self.find(supersede_with)
-            if successor is None:
-                raise NotFoundError(f"no memory named {supersede_with}")
-            record_module.invalidate(current, successor.valid_from or now, supersede_with)
-        if abstract is not None:
-            current.abstract = abstract.strip()
-        if body is not None:
-            current.body = body
-        if links is not None:
-            current.links = list(links)
-        if valid_from is not None:
-            current.valid_from = valid_from
-        current.updated = now
         with store_lock(self.layout):
-            for excerpt in provenance or []:
-                current.provenance.append(self._store_provenance(current.name, excerpt))
-        return self.write(current)
+            current = self.find(name)
+            if current is None or current.path is None:
+                raise NotFoundError(f"no memory named {name}")
+            if not current.is_active():
+                raise ValidationError(
+                    [FieldError("status", "correction requires an active memory")]
+                )
+            now = self.clock.timestamp()
+            if supersede_with:
+                successor = self.find(supersede_with)
+                if successor is None:
+                    raise NotFoundError(f"no memory named {supersede_with}")
+                if not successor.is_active():
+                    raise ValidationError(
+                        [FieldError("supersede_with", "successor must be active")]
+                    )
+                record_module.invalidate(current, successor.valid_from or now, supersede_with)
+            if abstract is not None:
+                current.abstract = abstract.strip()
+            if body is not None:
+                current.body = body
+            if links is not None:
+                current.links = list(links)
+            if valid_from is not None:
+                current.valid_from = valid_from
+            current.updated = now
+            return self._write_locked(
+                current, replace_links=links is not None, provenance=provenance
+            )
 
     def delete(self, name: str) -> MemoryRecord:
         """Marks the record invalid. The file stays; physical removal is a human command."""
@@ -350,14 +373,45 @@ class Store:
 
     def write(self, record: MemoryRecord) -> MemoryRecord:
         """Validate, persist, reproject. Agent writes and Manage rewrites share this path."""
-        if record.path is None:
-            raise NotFoundError(f"{record.name} has no location on disk")
+        with store_lock(self.layout):
+            return self._write_locked(record)
+
+    def _write_locked(
+        self,
+        record: MemoryRecord,
+        *,
+        replace_links: bool = False,
+        provenance: list[str] | None = None,
+    ) -> MemoryRecord:
+        self._validate_write(record, replace_links=replace_links)
+        for excerpt in provenance or []:
+            record.provenance.append(self._store_provenance(record.name, excerpt))
+        assert record.path is not None
+        record.path.write_text(record.to_text(), encoding="utf-8")
+        self._project()
+        return record
+
+    def _validate_write(self, record: MemoryRecord, *, replace_links: bool = False) -> None:
+        if record.path is None or self.layout.type_of(record.path) != record.type:
+            raise ValidationError([FieldError("path", "memory must belong to this store")])
         record_module.validate(record, self.config, self.schemas.get(record.type))
         record_module.canonicalise_dates(record)
-        with store_lock(self.layout):
-            record.path.write_text(record.to_text(), encoding="utf-8")
-            self._project()
-        return record
+        self._validate_links(record, self.find(record.name), replace_links=replace_links)
+
+    def _validate_links(
+        self, record: MemoryRecord, existing: MemoryRecord | None, *, replace_links: bool = False
+    ) -> None:
+        if replace_links and len(record.links) != len(set(record.links)):
+            raise ValidationError([FieldError("links", "duplicate target")])
+        names = set(record.links) if replace_links else set(record.links) - set(
+            existing.links if existing else []
+        )
+        for name in sorted(names):
+            target = self.find(name)
+            if name == record.name or target is None or not target.is_active():
+                raise ValidationError(
+                    [FieldError("links", f"{name} must name another active memory")]
+                )
 
     def feedback(self, name: str, delta: float) -> MemoryRecord:
         current = self.find(name)
@@ -366,7 +420,7 @@ class Store:
         current.weight = min(
             self.config.weight.ceiling, max(self.config.weight.floor, current.weight + delta)
         )
-        return current
+        return self.write(current)
 
     def read(self, name: str, level: str = LEVEL_FULL) -> ReadResult:
         if level not in LEVELS:
@@ -383,6 +437,7 @@ class Store:
             text = current.body
         stamp = self.clock.now().isoformat()
         self._log_access([AccessEntry(stamp, name, "", KIND_READ, self.agent)])
+        observation.emit("read_return", name=name, level=level, text=text, outline=headings)
         return ReadResult(record=current, level=level, text=text, outline=headings)
 
     def find(self, name: str) -> MemoryRecord | None:
