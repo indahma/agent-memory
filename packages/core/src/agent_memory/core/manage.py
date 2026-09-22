@@ -24,9 +24,8 @@ from .clock import Clock
 from .database import Database
 from .errors import FieldError, MemoryStoreError, NotFoundError, ValidationError
 from .ledger import VERDICT_ACCEPTED, VERDICT_REJECTED, Decision, DecisionLedger
-from .pending import Pending
 from .record import DATE_FIELDS, MemoryRecord
-from .sessions import Pointer, parse_pointer
+from .sessions import parse_pointer
 from .store import Store
 
 PROPOSAL_MERGE = "merge"
@@ -41,7 +40,6 @@ ACTION_LINK_ADDED = "link-added"
 ACTION_WEIGHT_SETTLED = "weight-settled"
 ACTION_CLUSTERED = "clustered"
 ACTION_GROUP_MERGED = "group-merged"
-ACTION_REDISTILL_REQUESTED = "redistill-requested"
 
 PROPOSAL_ID_LENGTH = 12
 REPORT_SUFFIX = ".md"
@@ -139,7 +137,6 @@ class Manage:
         actions.extend(self._merge_exact_duplicates(records))
         actions.extend(self._merge_near_duplicate_groups())
         actions.extend(self._cluster(self._store.records()))
-        actions.extend(self._request_redistill(self._store.records()))
 
         records = self._store.records()
         proposals = self.proposals(records=records, hits=hits)
@@ -260,38 +257,18 @@ class Manage:
         name = keeper.name + MERGED_SUFFIX
         if self._store.find(name) is not None:
             name += "-" + self._clock.stamp().lower()
-        now = self._clock.timestamp()
-        links = sorted(
-            {link for record in entries for link in record.links} - {r.name for r in entries}
+        merged = self._store.merge(
+            [record.name for record in entries], verdict.abstract, verdict.body, name=name
         )
-        merged = self._store.record(
-            type=keeper.type,
-            name=name,
-            fields=dict(keeper.fields),
-            abstract=verdict.abstract.strip(),
-            body=verdict.body.strip(),
-            links=links,
-            weight=max(record.weight for record in entries),
-            valid_from=now,
-            provenance=[pointer for record in entries for pointer in record.provenance],
-            create_group=True,
-        )
-        for record in entries:
-            record_module.invalidate(record, merged.valid_from or now, merged.name)
-            record.updated = now
-            self._rewrite(record)
         return f"merged into {merged.name}"
 
     def _supersede(self, proposal: Proposal) -> str:
         entries = [self._entry(name) for name in proposal.targets]
         keeper = max(entries, key=lambda record: (len(record.body), record.created, record.name))
-        now = self._clock.timestamp()
         for record in entries:
             if record.name == keeper.name:
                 continue
-            record_module.invalidate(record, now, keeper.name)
-            record.updated = now
-            self._rewrite(record)
+            self._store.supersede(record.name, keeper.name)
         return f"kept {keeper.name}"
 
     def _split(self, proposal: Proposal, verdict: reasoning.Verdict) -> str:
@@ -532,28 +509,6 @@ class Manage:
                 if not any(folder.iterdir()):
                     folder.rmdir()
 
-    def _request_redistill(self, records: list[MemoryRecord]) -> list[Action]:
-        """Raw material hit again and again with no memory citing it was missed by the still."""
-        with self._database.connect() as connection:
-            counts = AccessLog(connection).counts()
-        cited = [
-            pointer
-            for record in records
-            for pointer in (parse_pointer(item) for item in record.provenance)
-            if pointer is not None
-        ]
-        queue = Pending(self._store.layout)
-        actions: list[Action] = []
-        for name, hits in sorted(counts.items()):
-            pointer = parse_pointer(name)
-            if pointer is None or hits < self._config.manage.raw_hit_min:
-                continue
-            if any(pointer.overlaps(known) for known in cited):
-                continue
-            if queue.request_redistill(pointer):
-                actions.append(Action(ACTION_REDISTILL_REQUESTED, name, f"hits={hits}"))
-        return actions
-
     def _move(self, record: MemoryRecord, group_field: str, group: str) -> MemoryRecord:
         """A move is a write with one field changed; name, body and evidence travel intact."""
         return self._store.record(
@@ -771,10 +726,6 @@ def _as_instant(value: str | None) -> str:
         return timestamp.canonical(value)
     except ValueError:
         return ""
-
-
-def _overlapping(pointer: Pointer, cited: list[Pointer]) -> bool:
-    return any(pointer.overlaps(known) for known in cited)
 
 
 SECONDS_PER_HOUR = 3600.0

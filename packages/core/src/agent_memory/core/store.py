@@ -7,7 +7,10 @@ decides update versus replacement (ADR-009), and reprojects. Nothing here delete
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import os
 import pathlib
+import tempfile
 
 from . import chunking, memory_md, observation, placement, timestamp
 from . import record as record_module
@@ -135,18 +138,29 @@ class Store:
         self.schemas.ensure_factory()
         written: list[MemoryRecord] = []
         rejected: list[Rejected] = []
+        snapshots: dict[pathlib.Path, bytes | None] = {}
         if not specs:
             return BatchResult(written=written, rejected=rejected)
         with store_lock(self.layout):
             for index, spec in enumerate(specs):
                 try:
-                    written.append(self._write_one(_known_fields(spec)))
+                    record, changed = self._write_one(_known_fields(spec))
+                    written.append(record)
+                    for path, original in changed.items():
+                        snapshots.setdefault(path, original)
                 except ValidationError as error:
                     rejected.append(Rejected(index=index, errors=list(error.errors)))
-            self._project()
+            try:
+                self._project()
+            except Exception:
+                self._restore_files(snapshots)
+                self._project()
+                raise
         return BatchResult(written=written, rejected=rejected)
 
-    def _write_one(self, spec: dict[str, object]) -> MemoryRecord:
+    def _write_one(
+        self, spec: dict[str, object]
+    ) -> tuple[MemoryRecord, dict[pathlib.Path, bytes | None]]:
         """One malformed item is one rejection: a batch is many memories, and the rest of
         them reaching disk is what keeps a single stray key from costing a conversation."""
         schema = self.schemas.require(str(spec.get("type") or ""))
@@ -170,6 +184,8 @@ class Store:
         if supersedes and derived_name and (self.root / placed.relative_path).exists():
             placed = self._successor_placement(placed)
         target = self.root / placed.relative_path
+        if self.layout.type_of(target) != schema.type:
+            raise ValidationError([FieldError("path", "memory must belong to this store")])
         existing = self._at(target)
         moved_from: pathlib.Path | None = None
         if existing is None:
@@ -219,15 +235,27 @@ class Store:
             if pointer not in candidate.provenance:
                 candidate.provenance.append(pointer)
         self._reject_facts_dated_after_their_evidence(candidate)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(candidate.to_text(), encoding="utf-8")
-        if moved_from is not None and moved_from != target:
-            moved_from.unlink(missing_ok=True)
+        changed_paths = {target}
+        if moved_from is not None:
+            changed_paths.add(moved_from)
         if predecessor is not None and predecessor.path is not None:
             record_module.invalidate(predecessor, candidate.valid_from or now, candidate.name)
             predecessor.updated = now
-            predecessor.path.write_text(predecessor.to_text(), encoding="utf-8")
-        return candidate
+            record_module.validate(predecessor, self.config, self.schemas.get(predecessor.type))
+            changed_paths.add(predecessor.path)
+        snapshots = {path: path.read_bytes() if path.exists() else None for path in changed_paths}
+        try:
+            payload = candidate.to_text().encode("utf-8")
+            self._replace_file(target, payload)
+            if moved_from is not None and moved_from != target:
+                moved_from.unlink(missing_ok=True)
+            if predecessor is not None and predecessor.path is not None:
+                self._replace_file(predecessor.path, predecessor.to_text().encode("utf-8"))
+        except Exception:
+            self._restore_files(snapshots)
+            raise
+        candidate.source_hash = hashlib.sha256(payload).hexdigest()
+        return candidate, snapshots
 
     def _successor_placement(self, placed: placement.Placement) -> placement.Placement:
         """A successor with the same key as its predecessor keeps the key and takes the next
@@ -348,16 +376,73 @@ class Store:
             )
 
     def delete(self, name: str) -> MemoryRecord:
-        """Marks the record invalid. The file stays; physical removal is a human command."""
-        current = self.find(name)
-        if current is None or current.path is None:
-            raise NotFoundError(f"no memory named {name}")
-        if not current.is_active():
-            return current
-        now = self.clock.timestamp()
-        record_module.invalidate(current, now)
-        current.updated = now
-        return self.write(current)
+        """End the current interval while retaining the file for historical reads."""
+        with store_lock(self.layout):
+            current = self.find(name)
+            if current is None or current.path is None:
+                raise NotFoundError(f"no memory named {name}")
+            if not current.is_active():
+                return current
+            now = self.clock.timestamp()
+            record_module.invalidate(current, now)
+            current.updated = now
+            return self._write_locked(current)
+
+    def supersede(self, old: str, new: str) -> MemoryRecord:
+        return self.correct(old, supersede_with=new)
+
+    def merge(
+        self, names: list[str], abstract: str, body: str, name: str | None = None
+    ) -> MemoryRecord:
+        """Create one current memory and end its sources in a single locked transaction."""
+        if len(names) < len(("first", "second")) or len(names) != len(set(names)):
+            raise ValidationError([FieldError("names", "merge needs distinct sources")])
+        with store_lock(self.layout):
+            sources = [self.find(source) for source in names]
+            if any(source is None or not source.is_active() for source in sources):
+                raise ValidationError([FieldError("names", "sources must be active memories")])
+            active = [source for source in sources if source is not None]
+            if len({source.type for source in active}) != 1:
+                raise ValidationError([FieldError("type", "merge sources must share a type")])
+            keeper = active[0]
+            target_name = name or f"{keeper.name}-merged"
+            if self.find(target_name) is not None:
+                raise ValidationError([FieldError("name", "merge target already exists")])
+            links = sorted({link for source in active for link in source.links} - set(names))
+            snapshots: dict[pathlib.Path, bytes | None] = {}
+            try:
+                merged, changed = self._write_one({
+                    "name": target_name,
+                    "type": keeper.type,
+                    "fields": dict(keeper.fields),
+                    "abstract": abstract,
+                    "body": body,
+                    "links": links,
+                    "weight": max(source.weight for source in active),
+                    "create_group": True,
+                })
+                snapshots.update(changed)
+                merged.provenance = list(dict.fromkeys(
+                    pointer for source in active for pointer in source.provenance
+                ))
+                assert merged.path is not None
+                payload = merged.to_text().encode("utf-8")
+                self._replace_file(merged.path, payload)
+                merged.source_hash = hashlib.sha256(payload).hexdigest()
+                now = merged.valid_from or self.clock.timestamp()
+                for source in active:
+                    assert source.path is not None
+                    snapshots.setdefault(source.path, source.path.read_bytes())
+                    record_module.invalidate(source, now, merged.name)
+                    source.updated = self.clock.timestamp()
+                    record_module.validate(source, self.config, self.schemas.get(source.type))
+                    self._replace_file(source.path, source.to_text().encode("utf-8"))
+                self._project()
+            except Exception:
+                self._restore_files(snapshots)
+                self._project()
+                raise
+            return merged
 
     def gc(self) -> list[str]:
         """Physically removes invalid files. A human runs this; Manage cannot reach it."""
@@ -384,12 +469,45 @@ class Store:
         provenance: list[str] | None = None,
     ) -> MemoryRecord:
         self._validate_write(record, replace_links=replace_links)
+        assert record.path is not None
+        previous = record.path.read_bytes() if record.path.exists() else None
+        if previous is not None and (
+            record.source_hash is None
+            or hashlib.sha256(previous).hexdigest() != record.source_hash
+        ):
+            raise ValidationError([FieldError("updated", "memory changed since it was read")])
         for excerpt in provenance or []:
             record.provenance.append(self._store_provenance(record.name, excerpt))
-        assert record.path is not None
-        record.path.write_text(record.to_text(), encoding="utf-8")
-        self._project()
+        payload = record.to_text().encode("utf-8")
+        self._replace_file(record.path, payload)
+        try:
+            self._project()
+        except Exception:
+            if previous is None:
+                record.path.unlink(missing_ok=True)
+            else:
+                self._replace_file(record.path, previous)
+            self._project()
+            raise
+        record.source_hash = hashlib.sha256(payload).hexdigest()
         return record
+
+    def _replace_file(self, path: pathlib.Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
+            temporary.write(payload)
+            staged = pathlib.Path(temporary.name)
+        try:
+            os.replace(staged, path)
+        finally:
+            staged.unlink(missing_ok=True)
+
+    def _restore_files(self, snapshots: dict[pathlib.Path, bytes | None]) -> None:
+        for path, previous in snapshots.items():
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                self._replace_file(path, previous)
 
     def _validate_write(self, record: MemoryRecord, *, replace_links: bool = False) -> None:
         if record.path is None or self.layout.type_of(record.path) != record.type:
@@ -414,13 +532,14 @@ class Store:
                 )
 
     def feedback(self, name: str, delta: float) -> MemoryRecord:
-        current = self.find(name)
-        if current is None or current.path is None:
-            raise NotFoundError(f"no memory named {name}")
-        current.weight = min(
-            self.config.weight.ceiling, max(self.config.weight.floor, current.weight + delta)
-        )
-        return self.write(current)
+        with store_lock(self.layout):
+            current = self.find(name)
+            if current is None or current.path is None:
+                raise NotFoundError(f"no memory named {name}")
+            current.weight = min(
+                self.config.weight.ceiling, max(self.config.weight.floor, current.weight + delta)
+            )
+            return self._write_locked(current)
 
     def read(self, name: str, level: str = LEVEL_FULL) -> ReadResult:
         if level not in LEVELS:

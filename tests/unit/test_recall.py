@@ -57,7 +57,6 @@ def test_a_deleted_record_leaves_the_default_surface_but_not_the_past(seeded, cl
     clock.advance(days=1)
     seeded.delete("staging-deploy-e4021")
     assert "staging-deploy-e4021" not in _names(Recall(seeded).recall("E4021"))
-    assert "staging-deploy-e4021" not in _names(Recall(seeded).recall("E4021", deep=True))
     earlier = Recall(seeded).recall("E4021", as_of="2026-01-15T12:00:00Z")
     assert "staging-deploy-e4021" in _names(earlier)
 

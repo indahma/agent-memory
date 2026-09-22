@@ -10,6 +10,11 @@ import tomllib
 CONFIG_FILENAME = "config.toml"
 STORE_ENV_VAR = "AGENT_MEMORY_STORE"
 DEFAULT_STORE = "~/agent-memory-store"
+LEGACY_KNOBS = {
+    "index": frozenset({"raw_chunk_chars"}),
+    "recall": frozenset({"deep_limit_multiplier", "raw_enabled", "raw_relevance_factor"}),
+    "manage": frozenset({"raw_hit_min"}),
+}
 
 
 @dataclasses.dataclass
@@ -40,7 +45,6 @@ class StorageConfig:
 class IndexConfig:
     hash_prefix_length: int = 16
     chunk_min_chars: int = 200
-    raw_chunk_chars: int = 1200
     bm25_abstract_weight: float = 2.0
     bm25_body_weight: float = 1.0
     vector_enabled: bool = False
@@ -68,13 +72,10 @@ class WeightConfig:
 class RecallConfig:
     default_limit: int = 8
     candidate_pool_multiplier: int = 10
-    deep_limit_multiplier: int = 2
     recency_half_life_days: float = 180.0
     recency_decay_base: float = 0.5
     recency_floor: float = 0.25
     memory_md_weight_floor: float = 0.75
-    raw_enabled: bool = True
-    raw_relevance_factor: float = 0.4
     synthesis_hint: bool = True
     context_full_text_entries: int = 4
     injection_enabled: bool = True
@@ -98,7 +99,6 @@ class ManageConfig:
     max_splits_per_sleep: int = 2
     max_deletes_per_sleep: int = 3
     split_min_sections: int = 3
-    raw_hit_min: int = 3
     git_commit: bool = True
     dream_report_dirname: str = "dream-reports"
 
@@ -163,6 +163,8 @@ class Config:
                 raise ValueError(f"unknown config section: {section_name}")
             known = {field.name for field in dataclasses.fields(section)}
             for key, value in values.items():
+                if key in LEGACY_KNOBS.get(section_name, ()):
+                    continue
                 if key not in known:
                     raise ValueError(f"unknown config knob: {section_name}.{key}")
                 setattr(section, key, value)

@@ -1,7 +1,7 @@
 """The index database. Every table here is a cache — deleting the file loses no knowledge.
 
 Two text surfaces: the active surface (default retrieval) and the history surface (only
-`--as-of` reads it). Raw material has its own. A row in records exists for invalid files too,
+`--as-of` reads it). A row in records exists for invalid files too,
 so supersede chains resolve without touching the tree.
 """
 
@@ -31,7 +31,6 @@ SCHEMA = (
         path TEXT NOT NULL,
         type TEXT NOT NULL,
         abstract TEXT NOT NULL,
-        status TEXT NOT NULL,
         created TEXT NOT NULL,
         updated TEXT NOT NULL,
         valid_from TEXT NOT NULL,
@@ -58,14 +57,6 @@ SCHEMA = (
         kind UNINDEXED,
         anchor UNINDEXED,
         heading,
-        text
-    )
-    """,
-    """
-    CREATE VIRTUAL TABLE IF NOT EXISTS raw_chunks USING fts5(
-        name UNINDEXED,
-        path UNINDEXED,
-        anchor UNINDEXED,
         text
     )
     """,
@@ -110,6 +101,10 @@ class Database:
         connection = sqlite3.connect(self._layout.index_db)
         connection.row_factory = sqlite3.Row
         try:
+            columns = connection.execute("PRAGMA table_info(records)").fetchall()
+            if any(column["name"] == "status" for column in columns):
+                connection.execute("ALTER TABLE records DROP COLUMN status")
+            connection.execute("DROP TABLE IF EXISTS raw_chunks")
             for statement in SCHEMA:
                 connection.execute(statement)
             yield connection

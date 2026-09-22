@@ -60,12 +60,6 @@ def test_write_distill_read_and_bound_evidence_without_searching_raw(store, caps
         ),
     )
     name = report.batches[0].written[0]
-    from agent_memory.core.raw_index import RawIndex
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("normal read/trace must never search RawIndex")
-
-    monkeypatch.setattr(RawIndex, "match", forbidden)
     hits = Recall(store).recall("aquarium")
     assert hits[0].name == name and hits[0].source == "memory"
     assert "AQ-731" not in context.build(store, "aquarium").text
@@ -240,7 +234,7 @@ def test_raw_instructions_are_labeled_data_and_text_cli_prints_original_content(
     assert snapshot(store.root) == before
     skill = prompts.skill()
     assert "Judge it as evidence" in skill
-    assert 'mem context "<what you are about to do>" --deep' in skill
+    assert 'mem context "<what you are about to do>"' in skill
     assert "mem trace" in skill
 
 
@@ -271,12 +265,12 @@ def test_legacy_plain_transcript_preserves_original_line_numbers(store):
     ]
 
 
-def test_agentic_exam_keeps_deep_raw_discovery_as_the_default():
+def test_agentic_exam_uses_memory_first_and_bound_trace():
     from agent_memory.core import prompts
     from agent_memory.harness.systems import NativeSystem
 
     preamble = NativeSystem().exam_preamble()
-    assert 'Start with `mem context "<the question>" --deep`' in preamble
-    assert "archived conversations" in preamble
-    assert 'mem context "<what you are about to do>" --deep' in prompts.skill()
+    assert 'Start with `mem context "<the question>"`' in preamble
+    assert "mem trace <name>" in preamble
+    assert 'mem context "<what you are about to do>"' in prompts.skill()
     assert "mem trace" in prompts.skill()

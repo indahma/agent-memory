@@ -6,13 +6,10 @@ and presents historical content as data. Missing, inconsistent, or unbound evide
 fails explicitly. An explicit historical memory remains readable with its validity
 state; evidence from it does not become current truth.
 
-Trace is an explicit read capability. The default exam and generated skill retain
-their existing deep Raw retrieval policy. This preserves the discovery path for
-details omitted entirely by distillation, where no memory can supply a citation.
-Reused stores project their indexes before an exam so retrieval sees the same
-truth files that a fresh store would.
+Recall searches Memory only, using an explicit limit when more candidates are useful.
+Trace remains an explicit read capability bound to a selected Memory citation. Archived
+sessions stay available for audit and redistillation. Reused stores project their indexes
+before an exam so retrieval sees the same truth files that a fresh store would.
 
-Any change to the default reading policy is a new experiment configuration. Its
-effect requires paired runs on identical, indexed stores with enough observed
-nonempty reads through each compared path. Historical scores remain attached to
-the policy and corpus under which they were measured.
+Historical experiment scores remain attached to the reading policy and corpus under
+which they were measured.

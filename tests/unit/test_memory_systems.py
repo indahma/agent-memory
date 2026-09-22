@@ -175,7 +175,7 @@ def test_native_replay_projects_missing_index_before_retrieval(tmp_path, native)
 
     assert {p.relative_to(root): p.read_bytes() for p in store.layout.truth_files()} == before
     assert any(hit.name == "voucher" for hit in Recall(Store(root)).recall("voucher"))
-    assert any(hit.source == "raw" for hit in Recall(Store(root)).recall("CORAL-731", deep=True))
+    assert not Recall(Store(root)).recall("CORAL-731")
 
 
 def test_each_system_has_its_own_fingerprint_so_attribution_is_refused_across_them(

@@ -16,7 +16,7 @@ import tomllib
 from . import frontmatter, sessions
 from .config import CONFIG_FILENAME, Config, StorageConfig
 from .paths import ARCHIVE_DIRNAME, MEMORY_SUFFIX, SESSIONS_DIRNAME
-from .record import STATUS_ACTIVE, STATUS_INVALID
+from .record import STATUS_ACTIVE
 from .store import Store
 
 LEGACY_DOMAINS = ("user", "project", "reference", "experience")
@@ -85,13 +85,11 @@ def migrate(root: pathlib.Path) -> MigrationReport:
             fields.setdefault(key_field, str(fields.get("name")))
         status = str(fields.get("status") or STATUS_ACTIVE)
         if retired or status == LEGACY_STATUS_RETIRED or fields.get("superseded_by"):
-            fields["status"] = STATUS_INVALID
             fields.setdefault("invalid_at", fields.get("updated"))
             if not fields.get("invalid_at"):
                 fields["invalid_at"] = fields.get("updated")
             invalidated.append(str(fields["name"]))
-        elif status == LEGACY_STATUS_STALE:
-            fields["status"] = STATUS_ACTIVE
+        fields.pop("status", None)
         target = store.layout.type_dir(new_type) / domain / (str(fields["name"]) + MEMORY_SUFFIX)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(frontmatter.render(fields, body), encoding="utf-8")

@@ -2,9 +2,8 @@
 
 ## Read policy follow-up
 
-- Evaluate whether bound Trace should enter the default reading policy. Preserve
-  global deep Raw coverage when no Memory cites the needed session, and require
-  observed exposure before attributing answer changes to Trace.
+- Evaluate the memory-first reading policy with observed exposure before attributing
+  answer changes to bounded Trace or optional Vector candidates.
 
 ## Management follow-ups
 
@@ -14,7 +13,4 @@
   including stores outside Git and multi-file Manage failures.
 - Decide whether direct link/unlink delta commands, relation audit history and per-operation
   bounds are needed; current correct replaces the complete list.
-- Correct explicit feedback persistence: Store.feedback currently returns an adjusted object
-  without writing the weight back to disk.
-- Track stale Manage rewrites separately from correction serialization: Manage may prepare a
-  record before another writer changes it, then pass that old object to Store.write. See #16.
+- Review recovery of interrupted multi-file operations outside Git-backed stores.

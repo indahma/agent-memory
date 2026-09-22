@@ -28,7 +28,7 @@ CONTEXT_PLACEHOLDER = "<<retrieved-context>>"
 def build_context(store: Store, question: str, full_text_entries: int) -> core_context.Context:
     """Delegates to the core read surface; the harness holds no retrieval policy of its own."""
     store.config.recall.context_full_text_entries = full_text_entries
-    return core_context.build(store, question, deep=store.config.recall.raw_enabled)
+    return core_context.build(store, question)
 
 
 def fill_context(prompt: str, context: str) -> str:

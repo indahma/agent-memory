@@ -94,7 +94,7 @@ def execute(tmp_path, script, expected, setup):
     return events
 
 
-def test_zero_hit_deep_and_read_levels(tmp_path):
+def test_zero_hit_recall_and_read_levels(tmp_path):
     def setup(store):
         store.record(
             name="known",
@@ -104,14 +104,14 @@ def test_zero_hit_deep_and_read_levels(tmp_path):
         )
 
     def script(call):
-        assert call("recall", "zzqnonexistent", "--deep")["hits"] == []
+        assert call("recall", "zzqnonexistent")["hits"] == []
         for level in ("abstract", "outline", "full"):
             assert call("read", "known", "--level", level)["level"] == level
         return "done"
 
     events = execute(tmp_path, script, "done", setup)
     recall = next(e for e in events if e["kind"] == "recall_return")
-    assert recall["deep"] is True and recall["hits"] == []
+    assert recall["hits"] == [] and "deep" not in recall
     assert [e["level"] for e in events if e["kind"] == "read_return"] == [
         "abstract",
         "outline",
@@ -167,10 +167,10 @@ def test_observation_on_off_preserves_cli_bytes_and_core_returns(
     monkeypatch.setattr(cli, "Store", lambda *args, **kwargs: store)
     commands = [
         ("recall", "known ticket"),
-        ("recall", "known ticket", "--deep"),
-        ("context", "known ticket", "--deep"),
+        ("recall", "known ticket", "--limit", "20"),
+        ("context", "known ticket", "--limit", "20"),
         ("read", "known", "--level", "full"),
-        ("recall", "zzqnonexistent", "--deep"),
+        ("recall", "zzqnonexistent"),
         ("read", "absent"),
     ]
     for command in commands:

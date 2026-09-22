@@ -1,5 +1,6 @@
 import multiprocessing
 
+from agent_memory.core.errors import ValidationError
 from agent_memory.core.search_index import SearchIndex
 from agent_memory.core.store import Store
 
@@ -79,3 +80,41 @@ def test_independent_process_corrections_keep_both_updates_and_projection(store)
         assert any(item.name == "source" for item in index.match("newbodytoken", 10))
     store.rebuild_index()
     assert store.find("source").body == canonical.body
+
+
+def _append_until_deleted(root, worker, results):
+    writer = Store(root)
+    completed = 0
+    for number in range(8):
+        try:
+            writer.correct("source", provenance=[f"evidence {worker}-{number}"])
+        except ValidationError:
+            break
+        completed += 1
+    results.put(completed)
+
+
+def _delete_source(root):
+    Store(root).delete("source")
+
+
+def test_delete_racing_corrections_retains_every_successful_update(store):
+    store.record(type="fact", name="source", abstract="Original", body="Original body")
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    workers = [
+        context.Process(target=_append_until_deleted, args=(store.root, index, results))
+        for index in range(2)
+    ]
+    workers.append(context.Process(target=_delete_source, args=(store.root,)))
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(15)
+        assert worker.exitcode == 0
+    successful = sum(results.get(timeout=5) for _ in range(2))
+    current = store.find("source")
+    assert not current.is_active()
+    assert len(current.provenance) == successful
+    store.rebuild_index()
+    assert not store.find("source").is_active()

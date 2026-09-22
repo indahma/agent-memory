@@ -93,7 +93,6 @@ def _parser() -> argparse.ArgumentParser:
     reader.add_argument("query")
     reader.add_argument("--scope", default=None)
     reader.add_argument("--as-of", default=None)
-    reader.add_argument("--deep", action="store_true")
     reader.add_argument("--limit", type=int, default=None)
     reader.set_defaults(handler=_recall)
 
@@ -101,7 +100,6 @@ def _parser() -> argparse.ArgumentParser:
     contexter.add_argument("query")
     contexter.add_argument("--scope", default=None)
     contexter.add_argument("--as-of", default=None)
-    contexter.add_argument("--deep", action="store_true")
     contexter.add_argument("--limit", type=int, default=None)
     contexter.set_defaults(handler=_context)
 
@@ -129,6 +127,20 @@ def _parser() -> argparse.ArgumentParser:
     corrector.add_argument("--provenance", action="append", default=[])
     corrector.set_defaults(handler=_correct)
 
+    replacer = subparsers.add_parser(
+        "supersede", help="replace an old memory with an existing active memory"
+    )
+    replacer.add_argument("old")
+    replacer.add_argument("new")
+    replacer.set_defaults(handler=_supersede)
+
+    merger = subparsers.add_parser("merge", help="combine memories and end their source intervals")
+    merger.add_argument("names", nargs="+")
+    merger.add_argument("--name", default=None)
+    merger.add_argument("--abstract", required=True)
+    merger.add_argument("--body", required=True)
+    merger.set_defaults(handler=_merge)
+
     still = subparsers.add_parser(
         "distill", help="hand the archived backlog to the library executor and apply its writes"
     )
@@ -148,7 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     tracer.add_argument("--pointer", default=None, help="one cited reference or its subrange")
     tracer.set_defaults(handler=_trace)
 
-    remover = subparsers.add_parser("delete", help="mark one memory invalid; the file stays")
+    remover = subparsers.add_parser("delete", help="end one memory's validity; retain its history")
     remover.add_argument("name")
     remover.set_defaults(handler=_delete)
 
@@ -273,7 +285,7 @@ def _record_batch(store: Store, source: str) -> dict[str, object]:
 
 def _recall(store: Store, args: argparse.Namespace) -> dict[str, object]:
     hits = Recall(store).recall(
-        args.query, scope=args.scope, as_of=args.as_of, deep=args.deep, limit=args.limit
+        args.query, scope=args.scope, as_of=args.as_of, limit=args.limit
     )
     return {
         "query": args.query,
@@ -284,7 +296,7 @@ def _recall(store: Store, args: argparse.Namespace) -> dict[str, object]:
 
 def _context(store: Store, args: argparse.Namespace) -> dict[str, object]:
     built = context_module.build(
-        store, args.query, scope=args.scope, as_of=args.as_of, deep=args.deep, limit=args.limit
+        store, args.query, scope=args.scope, as_of=args.as_of, limit=args.limit
     )
     return {
         "query": args.query,
@@ -323,6 +335,17 @@ def _correct(store: Store, args: argparse.Namespace) -> dict[str, object]:
         "superseded_by": corrected.superseded_by,
         "updated": corrected.updated,
     }
+
+
+def _supersede(store: Store, args: argparse.Namespace) -> dict[str, object]:
+    replaced = store.supersede(args.old, args.new)
+    return {"name": replaced.name, "superseded_by": replaced.superseded_by,
+            "invalid_at": replaced.invalid_at}
+
+
+def _merge(store: Store, args: argparse.Namespace) -> dict[str, object]:
+    merged = store.merge(args.names, args.abstract, args.body, name=args.name)
+    return {"name": merged.name, "path": str(merged.path), "sources": args.names}
 
 
 def _distill(store: Store, args: argparse.Namespace) -> dict[str, object]:

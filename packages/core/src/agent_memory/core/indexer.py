@@ -5,16 +5,14 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 
-from . import chunking, sessions
+from . import chunking
 from . import record as record_module
-from .archive import SESSION_SUFFIX
 from .clock import Clock
 from .database import Database
 from .embeddings import Embedder
 from .errors import ValidationError
 from .manifest import Manifest, content_hash
 from .paths import StoreLayout
-from .raw_index import RawIndex
 from .record import MemoryRecord
 from .schema import SchemaRegistry
 from .search_index import SearchIndex
@@ -48,27 +46,11 @@ class Indexer:
         with self._database.connect() as connection:
             manifest = Manifest(connection, self._config.index.hash_prefix_length)
             index = SearchIndex(connection)
-            raw = RawIndex(connection)
             delta = manifest.diff(present)
             unreadable: list[str] = []
             reindexed: list[str] = []
             for relative in delta.touched:
                 path = self._layout.root / relative
-                if self._is_raw(path):
-                    raw.upsert(
-                        relative,
-                        sessions.session_name(path),
-                        sessions.read_file(path),
-                        self._config.index.raw_chunk_chars,
-                    )
-                    manifest.record(
-                        relative,
-                        sessions.session_name(path),
-                        present[relative],
-                        self._clock.now().isoformat(),
-                    )
-                    reindexed.append(relative)
-                    continue
                 record = self._load(path)
                 if record is None:
                     unreadable.append(relative)
@@ -81,7 +63,6 @@ class Indexer:
                 reindexed.append(relative)
             for relative in delta.removed:
                 index.remove_path(relative)
-                raw.remove(relative)
                 manifest.forget(relative)
             if self._config.index.vector_enabled:
                 assert self._embedder is not None
@@ -96,11 +77,7 @@ class Indexer:
 
     def _sync_vectors(self, connection, present: dict[str, str], embedder: Embedder) -> None:
         vectors = VectorIndex(connection, embedder, self._config.index.vector_model)
-        memory_paths = {
-            relative: digest
-            for relative, digest in present.items()
-            if not self._is_raw(self._layout.root / relative)
-        }
+        memory_paths = present
         known = vectors.known()
         for relative in sorted(set(known) - set(memory_paths)):
             vectors.remove_path(relative)
@@ -115,22 +92,14 @@ class Indexer:
         self._database.drop()
         return self.sync()
 
-    def _is_raw(self, path: pathlib.Path) -> bool:
-        return path.parent == self._layout.sessions
-
     def _present_hashes(self) -> dict[str, str]:
         present: dict[str, str] = {}
-        for path in self._layout.truth_files() + self._raw_files():
+        for path in self._layout.truth_files():
             relative = str(path.relative_to(self._layout.root))
             present[relative] = content_hash(
                 path.read_text(encoding="utf-8"), self._config.index.hash_prefix_length
             )
         return present
-
-    def _raw_files(self) -> list[pathlib.Path]:
-        if not self._layout.config.write.session_archive_enabled:
-            return []
-        return sorted(self._layout.sessions.glob("*" + SESSION_SUFFIX))
 
     def _load(self, path: pathlib.Path) -> MemoryRecord | None:
         type_name = self._layout.type_of(path)

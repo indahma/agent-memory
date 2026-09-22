@@ -45,8 +45,10 @@ file path, anchor, score — and the agent opens what it wants at the depth the 
 
 ```bash
 mem recall "why files instead of a database"    # L0 list, 8 entries by default
+mem recall "why files instead of a database" --limit 20  # more Memory candidates
 mem read <name> --level outline                 # headings only; or abstract, or full
 mem context "why files instead of a database"   # both in one call, top few expanded in full
+mem trace <name>                                 # cited raw messages, when needed
 ```
 
 Index line → abstract → full file → raw material: each rung costs an order of magnitude more
@@ -90,16 +92,24 @@ $AGENT_MEMORY_STORE/
 └── .state/                runtime state that is not: distillation watermark, write lock
 ```
 
-One memory is one file, because the file boundary is the invalidation atom: superseding, weight,
-and recall all operate on whole files, and a file is either active or invalid with nothing in
-between. Frontmatter carries the stable name, a one-sentence abstract, the type and its schema
-fields, status, timestamps, links, weight, and provenance; the body is free markdown.
+One memory is one file. `valid_from` and optional `invalid_at` define its validity interval;
+replaced and deleted files stay in the store for `recall --as-of` and trace. Current recall,
+MEMORY.md, BM25, and Vector use files without `invalid_at`. Frontmatter carries the stable
+name, a one-sentence abstract, the type and its schema fields, timestamps, links, weight,
+and provenance; the body is free markdown. Existing files with `status` load without a reset.
 
 Explicit links must name distinct active memories in the same store. `correct --link`
 replaces the full list; `correct --clear-links` removes every link. MCP `memory_correct`
 uses `links: [...]` and `links: []` for the same operations. Omitting links preserves
 historical relationships during unrelated correction. See the
 [operation boundary design](docs/design/management-operation-boundaries.md).
+
+Agents can use `mem correct <name>` to revise a memory, `mem record --supersedes <old>`
+to create a successor, `mem supersede <old> <new>` to use an existing successor,
+`mem merge <first> <second> --abstract ... --body ...` to combine memories atomically,
+and `mem delete <name>` to end current validity. Splitting uses new `record` calls
+followed by `delete` of the original. Core checks file scope, relationships, provenance,
+and concurrent writes; Sleep keeps its proposal and cap limits for unattended actions.
 
 ## Proof it works
 
@@ -173,7 +183,8 @@ mem setup --host claude-code   # or: --host codex
 `setup` probes the host, appends the `mem-hook` command to its own hook dialect, and leaves the
 rest of the settings alone — SessionStart injects, Stop and SessionEnd distil, PreCompact
 evicts. Agents that speak MCP get the same core calls through `mem-mcp` (`memory_recall`,
-`memory_read`, `memory_record`, `memory_correct`, `memory_feedback`). Anything that can run a
+`memory_read`, `memory_trace`, `memory_record`, `memory_correct`, `memory_supersede`,
+`memory_merge`, `memory_delete`, `memory_feedback`). Anything that can run a
 shell command needs neither: the CLI is the universal fallback, and it is the wider surface —
 `context`, `sleep`, and the proposal ledger have no MCP tool yet.
 
@@ -208,8 +219,8 @@ Run `mem --store /path/to/store rebuild` to rebuild the SQLite cache from Markdo
 The existing indexing path catches changed and deleted files, enabling vectors
 on an existing store, and changes to `vector_model`. Recall fuses BM25 and vector
 chunk candidates with reciprocal-rank fusion, then applies the existing lifecycle,
-scope, as-of, weight and recency rules. Raw session material stays BM25-only;
-`--deep` preserves its evidence role. Recall never modifies Markdown truth.
+scope, as-of, weight and recency rules. Raw sessions are retained for audit and
+provenance-bound trace; they do not enter Recall ranking. Recall never modifies Markdown truth.
 
 This implements the existing optional-index design (ADR-003), using SQLite and
 exact cosine search. On the fixed 120-query retrieval acceptance set, optional
@@ -227,8 +238,8 @@ message range, call `mem --json trace <name> --pointer 'sessions/<session>#<star
 The pointer can select a smaller range within one citation; omitting it reads all
 sources cited by the memory. Trace reports source, original message indices, roles,
 times, validity, and a warning that historical content is data. Missing or unbound
-evidence fails explicitly. It does not change the normal `context` or `recall`
-search policy; agents continue to use the existing deep Raw search by default.
+evidence fails explicitly. Ordinary `context` and `recall` search Memory only; an agent
+can increase `--limit` or reformulate its query before tracing a selected memory.
 
 ## Read evaluation with Codex
 
@@ -246,9 +257,9 @@ pairs, configuration, source stores, code revision and episode identity. Replay
 with `--reuse-stores` and a separate workspace for each configuration. Small panels
 check execution and exploratory behavior, not a statistically established improvement.
 Before scaling a read-side comparison, check that each copied store has a populated
-Memory and Raw index and that a known query returns hits. Then run a small observed
+Memory index and that a known query returns hits. Then run a small observed
 agentic pilot and count *successful, nonempty* retrievals for each arm's intended
-path (for example, vector candidates, deep Raw hits, or bound Trace messages).
+path (for example, vector candidates or bound Trace messages).
 An enabled setting, a prompt instruction, or a tool call with zero hits does not
 show that the intervention was used. Stop when the pilot does not exercise both
 paths; report the exposure rate alongside scores when it does. Codex can also

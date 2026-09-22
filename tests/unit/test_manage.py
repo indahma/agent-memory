@@ -10,7 +10,6 @@ from agent_memory.core.manage import (
     ACTION_DUPLICATE_MERGED,
     ACTION_GROUP_MERGED,
     ACTION_LINK_ADDED,
-    ACTION_REDISTILL_REQUESTED,
     ACTION_WEIGHT_SETTLED,
     PROPOSAL_DELETE,
     PROPOSAL_MERGE,
@@ -18,7 +17,6 @@ from agent_memory.core.manage import (
     PROPOSAL_SUPERSEDE,
     Manage,
 )
-from agent_memory.core.pending import Pending
 from agent_memory.core.recall import Recall
 
 
@@ -148,30 +146,11 @@ def test_group_directories_that_differ_only_in_spelling_are_merged(store):
     assert store.find("cup").fields["topic"] == "coffee"
 
 
-def test_raw_material_hit_repeatedly_but_cited_by_nothing_is_sent_back_to_the_still(store):
+def test_sleep_does_not_search_raw_material(store):
     store.archive.append_session("chat", ["user: the queue timeout is 30 seconds now"])
     store.rebuild_index()
-    for _ in range(store.config.manage.raw_hit_min):
-        Recall(store).recall("queue timeout", deep=True)
     report = Manage(store).sleep()
-    assert ACTION_REDISTILL_REQUESTED in _kinds(report)
-    requested = Pending(store.layout).redistill("chat")
-    assert requested and requested[0].session == "chat"
-    assert ACTION_REDISTILL_REQUESTED not in _kinds(Manage(store).sleep())
-
-
-def test_raw_material_already_cited_is_not_sent_back(store):
-    pointer = store.archive.append_session("chat", ["user: the queue timeout is 30 seconds now"])
-    store.record(
-        type="fact",
-        fields={"subject": "queue timeout"},
-        abstract="Queue timeout is 30 seconds",
-        provenance=["sessions/chat#0-0"],
-    )
-    for _ in range(store.config.manage.raw_hit_min):
-        Recall(store).recall("queue timeout", deep=True)
-    assert ACTION_REDISTILL_REQUESTED not in _kinds(Manage(store).sleep())
-    assert pointer is not None
+    assert report.actions == ()
 
 
 def test_a_file_with_sections_from_several_conversations_becomes_a_split_proposal(store):
