@@ -1,9 +1,8 @@
 """Export/import round-trip, and the path-traversal guard on import."""
 
-import pathlib
+import datetime as dt
 
 import pytest
-
 from agent_memory.core import portability
 from agent_memory.core.clock import FrozenClock
 from agent_memory.core.config import Config
@@ -13,13 +12,12 @@ from agent_memory.core.store import Store
 @pytest.fixture
 def source_store(tmp_path):
     config = Config.default()
-    clock = FrozenClock(__import__("datetime").datetime(2026, 1, 15, 9, 0, tzinfo=__import__("datetime").UTC))
+    clock = FrozenClock(dt.datetime(2026, 1, 15, 9, 0, tzinfo=dt.UTC))
     store = Store(tmp_path / "src-store", config=config, clock=clock, agent="test")
     store.init()
     store.record(
         abstract="A memory about queues",
         type="fact",
-        domain="project",
         name="queue-fact",
     )
     return store
@@ -28,7 +26,7 @@ def source_store(tmp_path):
 @pytest.fixture
 def target_store(tmp_path):
     config = Config.default()
-    clock = FrozenClock(__import__("datetime").datetime(2026, 1, 15, 9, 0, tzinfo=__import__("datetime").UTC))
+    clock = FrozenClock(dt.datetime(2026, 1, 15, 9, 0, tzinfo=dt.UTC))
     store = Store(tmp_path / "dst-store", config=config, clock=clock, agent="test")
     store.init()
     return store
