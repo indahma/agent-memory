@@ -1,4 +1,9 @@
-"""The index database. Every table here is a cache — deleting the file loses no knowledge."""
+"""The index database. Every table here is a cache — deleting the file loses no knowledge.
+
+Two text surfaces: the active surface (default retrieval) and the history surface (only
+`--as-of` reads it). A row in records exists for invalid files too,
+so supersede chains resolve without touching the tree.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from .paths import StoreLayout
+
+SURFACE_ACTIVE = "chunks"
+SURFACE_HISTORY = "history"
 
 SCHEMA = (
     """
@@ -21,22 +29,30 @@ SCHEMA = (
     CREATE TABLE IF NOT EXISTS records (
         name TEXT PRIMARY KEY,
         path TEXT NOT NULL,
-        domain TEXT NOT NULL,
         type TEXT NOT NULL,
         abstract TEXT NOT NULL,
-        status TEXT NOT NULL,
         created TEXT NOT NULL,
         updated TEXT NOT NULL,
         valid_from TEXT NOT NULL,
+        invalid_at TEXT,
         superseded_by TEXT,
         weight REAL NOT NULL,
         author TEXT NOT NULL,
         links TEXT NOT NULL,
-        archived INTEGER NOT NULL
+        provenance TEXT NOT NULL
     )
     """,
-    """
-    CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+    f"""
+    CREATE VIRTUAL TABLE IF NOT EXISTS {SURFACE_ACTIVE} USING fts5(
+        name UNINDEXED,
+        kind UNINDEXED,
+        anchor UNINDEXED,
+        heading,
+        text
+    )
+    """,
+    f"""
+    CREATE VIRTUAL TABLE IF NOT EXISTS {SURFACE_HISTORY} USING fts5(
         name UNINDEXED,
         kind UNINDEXED,
         anchor UNINDEXED,
@@ -45,11 +61,22 @@ SCHEMA = (
     )
     """,
     """
-    CREATE VIRTUAL TABLE IF NOT EXISTS raw_chunks USING fts5(
-        name UNINDEXED,
-        path UNINDEXED,
-        anchor UNINDEXED,
-        text
+    CREATE TABLE IF NOT EXISTS vector_files (
+        path TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        model TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS vector_chunks (
+        path TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        anchor TEXT NOT NULL,
+        heading TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        PRIMARY KEY(path, chunk_index)
     )
     """,
     """
@@ -74,6 +101,10 @@ class Database:
         connection = sqlite3.connect(self._layout.index_db)
         connection.row_factory = sqlite3.Row
         try:
+            columns = connection.execute("PRAGMA table_info(records)").fetchall()
+            if any(column["name"] == "status" for column in columns):
+                connection.execute("ALTER TABLE records DROP COLUMN status")
+            connection.execute("DROP TABLE IF EXISTS raw_chunks")
             for statement in SCHEMA:
                 connection.execute(statement)
             yield connection

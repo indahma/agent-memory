@@ -19,28 +19,57 @@ def test_defaults_are_complete_and_self_consistent():
     assert config.weight.floor < config.weight.initial < config.weight.ceiling
     assert config.weight.decay_step > 0
     assert config.weight.boost_step > 0
-    assert config.recall.retrieval_weight_floor >= config.weight.floor
+    assert config.manage.max_merges_per_sleep >= 0
     assert config.recall.default_limit > 0
     assert config.recall.recency_half_life_days > 0
-    assert set(config.storage.domain_types) == set(config.storage.domains)
+    assert config.storage.max_depth >= len(("type", "file"))
 
 
-def test_every_domain_allows_at_least_one_type_and_types_are_disjoint_from_domains():
+def test_every_factory_group_field_has_a_source_that_may_name_a_directory():
+    from agent_memory.core import schema
+
     config = Config.default()
-    for domain in config.storage.domains:
-        assert config.storage.domain_types[domain]
+    for item in schema.FACTORY:
+        if item.group:
+            source = schema.source_of(item.group, config)
+            assert source in (schema.SOURCE_SYSTEM, schema.SOURCE_MENU)
 
 
 def test_config_round_trips_through_disk(tmp_path):
     original = Config.default()
     original.manage.trigger_min_sessions += 1
     original.recall.default_limit += 1
+    original.index.vector_enabled = True
+    original.index.vector_model = "test/model-v2"
     original.save(tmp_path)
 
     assert (tmp_path / CONFIG_FILENAME).exists()
     reloaded = Config.load(tmp_path)
     assert reloaded.manage.trigger_min_sessions == original.manage.trigger_min_sessions
     assert reloaded.recall.default_limit == original.recall.default_limit
+    assert reloaded.index.vector_enabled is True
+    assert reloaded.index.vector_model == "test/model-v2"
+
+
+def test_vector_knobs_leave_the_recall_fingerprint_alone_while_disabled():
+    config = Config.default()
+    before = config.recall_fingerprint()
+    config.index.vector_model = "test/another-model"
+    assert config.recall_fingerprint() == before
+
+
+def test_default_recall_fingerprint_matches_memory_only_policy():
+    assert Config.default().recall_fingerprint() == "a8f591edf4e3b73b"
+
+
+def test_enabling_vector_changes_the_recall_fingerprint_and_so_does_the_model():
+    config = Config.default()
+    before = config.recall_fingerprint()
+    config.index.vector_enabled = True
+    enabled = config.recall_fingerprint()
+    assert enabled != before
+    config.index.vector_model = "test/another-model"
+    assert config.recall_fingerprint() != enabled
 
 
 def test_load_without_file_yields_defaults(tmp_path):
@@ -50,6 +79,17 @@ def test_load_without_file_yields_defaults(tmp_path):
 def test_unknown_knob_is_rejected_rather_than_silently_ignored(tmp_path):
     (tmp_path / CONFIG_FILENAME).write_text("[recall]\nnot_a_knob = 3\n", encoding="utf-8")
     with pytest.raises(ValueError):
+        Config.load(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value, error",
+    [("'true'", "index.vector_enabled"), ("''", "index.vector_model")],
+)
+def test_invalid_vector_configuration_is_rejected(tmp_path, value, error):
+    knob = "vector_enabled" if "enabled" in error else "vector_model"
+    (tmp_path / CONFIG_FILENAME).write_text(f"[index]\n{knob} = {value}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=error):
         Config.load(tmp_path)
 
 

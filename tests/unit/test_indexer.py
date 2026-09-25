@@ -14,7 +14,6 @@ def test_touching_one_file_reindexes_only_that_file(seeded):
     seeded.record(
         abstract="Queue drain window is now 90 seconds",
         type="fact",
-        domain="project",
         name="drain-window",
     )
     report = seeded.sync_index()
@@ -31,7 +30,6 @@ def test_rebuild_after_deleting_the_index_returns_the_same_recall_set(seeded):
     seeded.record(
         abstract="Second deploy note about the drain window",
         type="experience",
-        domain="experience",
         name="drain-window-note",
     )
     seeded.correct("file-truth-invariant", body="Rewritten body about file truth and indexes.")
@@ -51,16 +49,15 @@ def test_rebuild_is_idempotent(seeded):
     assert set(first.reindexed) == set(second.reindexed)
 
 
-def test_a_dangling_link_is_reported_but_does_not_reject_the_write(store):
+def test_a_legacy_dangling_link_is_reported_by_rebuild(store):
     written = store.record(
         abstract="Points at a memory that does not exist yet",
         type="fact",
-        domain="project",
         name="forward-reference",
-        links=["not-written-yet"],
     )
-    assert written.path.exists()
-    report = store.sync_index()
+    written.links = ["not-written-yet"]
+    written.path.write_text(written.to_text())
+    report = store.rebuild_index()
     assert ("forward-reference", "not-written-yet") in report.dangling_links
 
 
@@ -85,7 +82,6 @@ def test_memory_md_budget_is_a_hard_ceiling(store):
         store.record(
             abstract=f"Filler memory number {index} with a reasonably long abstract line",
             type="fact",
-            domain="project",
             name=f"filler-{index}",
         )
     text = store.layout.memory_index.read_text(encoding="utf-8")

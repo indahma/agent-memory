@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from agent_memory.core.errors import FieldError, ValidationError
-from agent_memory.core.manage import Manage
 from agent_memory.core.recall import Recall
 from agent_memory.core.store import LEVEL_FULL, LEVELS, Store
 
@@ -11,12 +10,12 @@ TOOL_RECALL = "memory_recall"
 TOOL_READ = "memory_read"
 TOOL_RECORD = "memory_record"
 TOOL_CORRECT = "memory_correct"
+TOOL_SUPERSEDE = "memory_supersede"
+TOOL_DELETE = "memory_delete"
+TOOL_TRACE = "memory_trace"
+TOOL_MERGE = "memory_merge"
 TOOL_FEEDBACK = "memory_feedback"
-TOOL_PROPOSALS = "memory_proposals"
-TOOL_DECIDE = "memory_decide"
 
-DOMAINS = ("user", "project", "reference", "experience")
-VERDICT_ACCEPT = "accept"
 
 SCHEMAS: dict[str, dict[str, object]] = {
     TOOL_RECALL: {
@@ -25,7 +24,6 @@ SCHEMAS: dict[str, dict[str, object]] = {
             "query": {"type": "string"},
             "scope": {"type": "string"},
             "as_of": {"type": "string"},
-            "deep": {"type": "boolean"},
             "limit": {"type": "integer"},
         },
         "required": ["query"],
@@ -43,15 +41,15 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "properties": {
             "abstract": {"type": "string"},
             "type": {"type": "string"},
-            "domain": {"type": "string", "enum": list(DOMAINS)},
+            "fields": {"type": "object", "additionalProperties": {"type": "string"}},
             "body": {"type": "string"},
             "name": {"type": "string"},
-            "topic": {"type": "string"},
+            "create_group": {"type": "boolean"},
             "links": {"type": "array", "items": {"type": "string"}},
             "provenance": {"type": "array", "items": {"type": "string"}},
             "supersedes": {"type": "string"},
         },
-        "required": ["abstract", "type", "domain"],
+        "required": ["abstract", "type"],
     },
     TOOL_CORRECT: {
         "type": "object",
@@ -60,8 +58,38 @@ SCHEMAS: dict[str, dict[str, object]] = {
             "abstract": {"type": "string"},
             "body": {"type": "string"},
             "supersede_with": {"type": "string"},
+            "links": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Replace all links; empty list removes all links",
+            },
+            "provenance": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["name"],
+    },
+    TOOL_SUPERSEDE: {
+        "type": "object",
+        "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+        "required": ["old", "new"],
+    },
+    TOOL_DELETE: {
+        "type": "object", "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+    TOOL_TRACE: {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "pointer": {"type": "string"}},
+        "required": ["name"],
+    },
+    TOOL_MERGE: {
+        "type": "object",
+        "properties": {
+            "names": {"type": "array", "items": {"type": "string"}},
+            "name": {"type": "string"},
+            "abstract": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        "required": ["names", "abstract", "body"],
     },
     TOOL_FEEDBACK: {
         "type": "object",
@@ -71,16 +99,6 @@ SCHEMAS: dict[str, dict[str, object]] = {
         },
         "required": ["name", "direction"],
     },
-    TOOL_PROPOSALS: {"type": "object", "properties": {}},
-    TOOL_DECIDE: {
-        "type": "object",
-        "properties": {
-            "proposal": {"type": "string"},
-            "verdict": {"type": "string", "enum": ["accept", "reject"]},
-            "text": {"type": "string"},
-        },
-        "required": ["proposal", "verdict"],
-    },
 }
 
 DESCRIPTIONS = {
@@ -88,9 +106,11 @@ DESCRIPTIONS = {
     TOOL_READ: "Read one memory at a chosen level of detail.",
     TOOL_RECORD: "Write one memory into the store.",
     TOOL_CORRECT: "Update a memory in place, or supersede it with a newer one.",
+    TOOL_SUPERSEDE: "End an old memory's validity in favor of an existing active memory.",
+    TOOL_DELETE: "End a named memory's validity while retaining historical evidence.",
+    TOOL_TRACE: "Read only the archived messages cited by a named memory.",
+    TOOL_MERGE: "Combine named active memories atomically and retain their history.",
     TOOL_FEEDBACK: "Raise or lower a memory's weight explicitly.",
-    TOOL_PROPOSALS: "List the Manage proposals awaiting confirmation.",
-    TOOL_DECIDE: "Confirm or refuse one Manage proposal.",
 }
 
 
@@ -110,6 +130,21 @@ def dispatch(store: Store, tool: str, arguments: dict[str, object]) -> dict[str,
 
 
 def _require(tool: str, arguments: dict[str, object]) -> None:
+    if "links" in arguments and (
+        not isinstance(arguments["links"], list)
+        or not all(isinstance(item, str) for item in arguments["links"])
+    ):
+        raise ValidationError([FieldError("links", "must be an array of memory names")])
+    if "names" in arguments and (
+        not isinstance(arguments["names"], list)
+        or not all(isinstance(item, str) for item in arguments["names"])
+    ):
+        raise ValidationError([FieldError("names", "must be an array of memory names")])
+    if "provenance" in arguments and (
+        not isinstance(arguments["provenance"], list)
+        or not all(isinstance(item, str) for item in arguments["provenance"])
+    ):
+        raise ValidationError([FieldError("provenance", "must be an array of references")])
     schema = SCHEMAS[tool]
     required = schema.get("required")
     missing = [
@@ -120,6 +155,10 @@ def _require(tool: str, arguments: dict[str, object]) -> None:
     if missing:
         raise ValidationError([FieldError(field, "required") for field in missing])
     properties = schema.get("properties")
+    unknown = set(arguments) - set(properties if isinstance(properties, dict) else {})
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValidationError([FieldError("arguments", f"unknown field: {names}")])
     for field, rules in (properties if isinstance(properties, dict) else {}).items():
         allowed = rules.get("enum") if isinstance(rules, dict) else None
         value = arguments.get(field)
@@ -132,7 +171,6 @@ def _recall(store: Store, arguments: dict[str, object]) -> dict[str, object]:
         str(arguments["query"]),
         scope=_optional(arguments, "scope"),
         as_of=_optional(arguments, "as_of"),
-        deep=bool(arguments.get("deep", False)),
         limit=int(str(arguments["limit"])) if arguments.get("limit") else None,
     )
     return {
@@ -151,6 +189,7 @@ def _read(store: Store, arguments: dict[str, object]) -> dict[str, object]:
         "path": str(result.record.path),
         "outline": list(result.outline),
         "text": result.text,
+        "provenance": list(result.record.provenance),
     }
 
 
@@ -158,10 +197,10 @@ def _record(store: Store, arguments: dict[str, object]) -> dict[str, object]:
     written = store.record(
         abstract=str(arguments["abstract"]),
         type=str(arguments["type"]),
-        domain=str(arguments["domain"]),
+        fields=_string_map(arguments.get("fields")),
         body=str(arguments.get("body") or ""),
         name=_optional(arguments, "name"),
-        topic=_optional(arguments, "topic"),
+        create_group=bool(arguments.get("create_group")),
         links=_string_list(arguments.get("links")),
         provenance=_string_list(arguments.get("provenance")),
         supersedes=_optional(arguments, "supersedes"),
@@ -175,6 +214,8 @@ def _correct(store: Store, arguments: dict[str, object]) -> dict[str, object]:
         abstract=_optional(arguments, "abstract"),
         body=_optional(arguments, "body"),
         supersede_with=_optional(arguments, "supersede_with"),
+        links=_string_list(arguments["links"]) if "links" in arguments else None,
+        provenance=_string_list(arguments["provenance"]) if "provenance" in arguments else None,
     )
     return {
         "name": corrected.name,
@@ -190,26 +231,43 @@ def _feedback(store: Store, arguments: dict[str, object]) -> dict[str, object]:
     return {"name": updated.name, "weight": updated.weight}
 
 
+def _supersede(store: Store, arguments: dict[str, object]) -> dict[str, object]:
+    replaced = store.supersede(str(arguments["old"]), str(arguments["new"]))
+    return {"name": replaced.name, "superseded_by": replaced.superseded_by,
+            "invalid_at": replaced.invalid_at}
+
+
+def _delete(store: Store, arguments: dict[str, object]) -> dict[str, object]:
+    removed = store.delete(str(arguments["name"]))
+    return {"name": removed.name, "status": removed.status, "invalid_at": removed.invalid_at}
+
+
+def _trace(store: Store, arguments: dict[str, object]) -> dict[str, object]:
+    return store.trace_evidence(str(arguments["name"]), _optional(arguments, "pointer")).as_dict()
+
+
+def _merge(store: Store, arguments: dict[str, object]) -> dict[str, object]:
+    merged = store.merge(
+        _string_list(arguments["names"]), str(arguments["abstract"]),
+        str(arguments["body"]), name=_optional(arguments, "name"),
+    )
+    return {"name": merged.name, "path": str(merged.path),
+            "sources": _string_list(arguments["names"])}
+
+
 def _optional(arguments: dict[str, object], key: str) -> str | None:
     value = arguments.get(key)
     return str(value) if value is not None and str(value) != "" else None
 
 
+def _string_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
+
+
 def _string_list(value: object) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
-
-
-def _proposals(store: Store, arguments: dict[str, object]) -> dict[str, object]:
-    return {"proposals": [proposal.as_dict() for proposal in Manage(store).proposals()]}
-
-
-def _decide(store: Store, arguments: dict[str, object]) -> dict[str, object]:
-    decision = Manage(store).decide(
-        str(arguments["proposal"]),
-        accept=str(arguments["verdict"]) == VERDICT_ACCEPT,
-        text=str(arguments.get("text") or ""),
-    )
-    return dict(decision.as_dict())
 
 
 _HANDLERS = {
@@ -217,7 +275,9 @@ _HANDLERS = {
     TOOL_READ: _read,
     TOOL_RECORD: _record,
     TOOL_CORRECT: _correct,
+    TOOL_SUPERSEDE: _supersede,
+    TOOL_DELETE: _delete,
+    TOOL_TRACE: _trace,
+    TOOL_MERGE: _merge,
     TOOL_FEEDBACK: _feedback,
-    TOOL_PROPOSALS: _proposals,
-    TOOL_DECIDE: _decide,
 }

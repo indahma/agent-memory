@@ -39,10 +39,9 @@ def build(
     query: str,
     scope: str | None = None,
     as_of: str | None = None,
-    deep: bool = False,
     limit: int | None = None,
 ) -> Context:
-    hits = Recall(store).recall(query, scope=scope, as_of=as_of, deep=deep, limit=limit)
+    hits = Recall(store).recall(query, scope=scope, as_of=as_of, limit=limit)
     if not hits:
         return Context(text=NOTHING_FOUND, entries=0, names=())
 

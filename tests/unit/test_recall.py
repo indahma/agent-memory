@@ -5,7 +5,8 @@ import hashlib
 from agent_memory.core.access_log import AccessLog
 from agent_memory.core.database import Database
 from agent_memory.core.recall import Recall
-from agent_memory.core.store import LEVEL_ABSTRACT, LEVEL_OUTLINE
+from agent_memory.core.schema import MemorySchema, render
+from agent_memory.core.store import LEVEL_ABSTRACT, LEVEL_OUTLINE, Store
 
 
 def _names(hits):
@@ -26,7 +27,6 @@ def test_superseded_records_are_excluded_before_relevance_is_considered(seeded):
     seeded.record(
         abstract="The staging deploy now fails with error E4021 only under load",
         type="experience",
-        domain="experience",
         name="staging-deploy-e4021-under-load",
         valid_from="2026-01-10",
     )
@@ -41,7 +41,6 @@ def test_as_of_walks_back_up_the_supersede_chain(seeded):
     seeded.record(
         abstract="The staging deploy now fails with error E4021 only under load",
         type="experience",
-        domain="experience",
         name="staging-deploy-e4021-under-load",
         valid_from="2026-02-01",
     )
@@ -54,16 +53,84 @@ def test_as_of_walks_back_up_the_supersede_chain(seeded):
     assert "staging-deploy-e4021-under-load" in _names(after)
 
 
-def test_deep_is_the_only_way_into_the_archive(seeded):
-    seeded.retire("staging-deploy-e4021")
+def test_a_deleted_record_leaves_the_default_surface_but_not_the_past(seeded, clock):
+    clock.advance(days=1)
+    seeded.delete("staging-deploy-e4021")
     assert "staging-deploy-e4021" not in _names(Recall(seeded).recall("E4021"))
-    assert "staging-deploy-e4021" in _names(Recall(seeded).recall("E4021", deep=True))
+    earlier = Recall(seeded).recall("E4021", as_of="2026-01-15T12:00:00Z")
+    assert "staging-deploy-e4021" in _names(earlier)
 
 
 def test_scope_restricts_by_path_prefix(seeded):
     hits = Recall(seeded).recall("deploy queue drain answers", scope="experience")
     assert hits
-    assert {hit.domain for hit in hits} == {"experience"}
+    assert {hit.type for hit in hits} == {"experience"}
+
+
+def test_scope_matches_a_complete_path_component(store):
+    extra = MemorySchema(
+        type="experience-archive",
+        description="Archived experiences used to test a colliding scope prefix.",
+        key=("subject",),
+    )
+    store.schemas.path_for(extra.type).write_text(render(extra), encoding="utf-8")
+    store.record(
+        abstract="Shared scope marker in the active experience domain",
+        type="experience",
+        name="active-scope-marker",
+    )
+    store.record(
+        abstract="Shared scope marker in the archive domain",
+        type=extra.type,
+        fields={"subject": "archive-scope-marker"},
+    )
+
+    hits = Recall(store).recall("shared scope marker", scope="experience")
+
+    assert _names(hits) == ["active-scope-marker"]
+
+
+def test_scope_filters_matches_before_the_candidate_pool_is_truncated(store):
+    pool = store.config.recall.candidate_pool_multiplier
+    specs = [
+        {
+            "abstract": "scopeprobe scopeprobe scopeprobe",
+            "type": "decision",
+            "fields": {"project": "outside"},
+            "name": f"outside-{index}",
+        }
+        for index in range(pool + 1)
+    ]
+    specs.append(
+        {
+            "abstract": "scopeprobe",
+            "type": "decision",
+            "fields": {"project": "inside"},
+            "name": "inside-scopeprobe",
+        }
+    )
+    assert not store.record_many(specs).rejected
+
+    hits = Recall(store).recall("scopeprobe", scope="decision/inside", limit=1)
+
+    assert _names(hits) == ["inside-scopeprobe"]
+
+
+def test_scope_applies_to_historical_candidates(store, clock):
+    store.record(
+        abstract="scopehistory",
+        type="decision",
+        fields={"project": "inside"},
+        name="inside-scopehistory",
+    )
+    clock.advance(days=1)
+    store.delete("inside-scopehistory")
+
+    hits = Recall(store).recall(
+        "scopehistory", scope="decision/inside", as_of="2026-01-15T09:00:00Z"
+    )
+
+    assert _names(hits) == ["inside-scopehistory"]
 
 
 def test_l0_entries_carry_the_full_contract(seeded):
@@ -78,19 +145,21 @@ def test_weight_reorders_two_otherwise_comparable_hits(seeded):
     seeded.record(
         abstract="Deploy notes for the drain window, second copy",
         type="experience",
-        domain="experience",
         name="drain-notes-b",
     )
     seeded.record(
         abstract="Deploy notes for the drain window, first copy",
         type="experience",
-        domain="experience",
         name="drain-notes-a",
     )
     baseline = _names(Recall(seeded).recall("deploy notes drain window"))
+    before = seeded.find("drain-notes-b").weight
     seeded.feedback("drain-notes-b", seeded.config.weight.boost_step)
-    boosted = _names(Recall(seeded).recall("deploy notes drain window"))
-    assert boosted.index("drain-notes-b") <= baseline.index("drain-notes-b")
+    reopened = Store(seeded.root, config=seeded.config, clock=seeded.clock)
+    boosted = _names(Recall(reopened).recall("deploy notes drain window"))
+    assert baseline.index("drain-notes-a") < baseline.index("drain-notes-b")
+    assert boosted.index("drain-notes-b") < boosted.index("drain-notes-a")
+    assert reopened.find("drain-notes-b").weight == before + seeded.config.weight.boost_step
 
 
 def test_recall_writes_the_access_log_and_leaves_truth_bytes_untouched(seeded):
@@ -133,7 +202,6 @@ def test_the_recall_list_length_is_a_knob(seeded):
         seeded.record(
             abstract=f"Evening habit number {index}: reading, tea, and an early night",
             type="preference",
-            domain="user",
             name=f"evening-habit-{index}",
         )
     narrow = Recall(seeded).recall("evening habits reading tea")

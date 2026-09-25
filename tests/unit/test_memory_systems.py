@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import shutil
 
 import pytest
 from agent_memory.core import prompts
@@ -75,8 +76,13 @@ def test_the_exam_prompt_takes_the_systems_preamble(native, memcore):
     from agent_memory.harness import dataset
 
     episode = dataset.Episode(
-        id="q1", question="What plant?", answer="snake plant", question_type="t",
-        question_date="2026/02/01", sessions=(), evidence_session_ids=(),
+        id="q1",
+        question="What plant?",
+        answer="snake plant",
+        question_type="t",
+        question_date="2026/02/01",
+        sessions=(),
+        evidence_session_ids=(),
     )
     ours = framing.exam(episode, native.exam_preamble())
     theirs = framing.exam(episode, memcore.exam_preamble())
@@ -146,8 +152,30 @@ def test_the_native_system_archives_the_transcript(tmp_path, native):
     root = tmp_path / "q1"
     native.prepare(root, fresh=True)
     native.archive(root, "q1-0", "user: the drain window rule")
-    archived = list(Store(root).layout.sessions.glob("*.txt"))
+    archived = list(Store(root).layout.sessions.glob("*.jsonl"))
     assert archived and "drain window" in archived[0].read_text(encoding="utf-8")
+
+
+def test_native_replay_projects_missing_index_before_retrieval(tmp_path, native):
+    from agent_memory.core.recall import Recall
+    from agent_memory.core.store import Store
+
+    root = tmp_path / "copied-store"
+    store = Store(root)
+    store.init()
+    store.archive.append_session(
+        "source",
+        [{"role": "user", "text": "Voucher code is CORAL-731.", "at": "2026-01-01T00:00:00Z"}],
+    )
+    store.record(name="voucher", type="fact", abstract="Voucher details", body="Code in source")
+    before = {p.relative_to(root): p.read_bytes() for p in store.layout.truth_files()}
+    shutil.rmtree(root / ".index")
+
+    native.prepare(root, fresh=False)
+
+    assert {p.relative_to(root): p.read_bytes() for p in store.layout.truth_files()} == before
+    assert any(hit.name == "voucher" for hit in Recall(Store(root)).recall("voucher"))
+    assert not Recall(Store(root)).recall("CORAL-731")
 
 
 def test_each_system_has_its_own_fingerprint_so_attribution_is_refused_across_them(

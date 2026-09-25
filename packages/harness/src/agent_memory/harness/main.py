@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import dataclasses
 import datetime
 import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 
@@ -30,7 +32,7 @@ from . import report as report_module
 from . import workspace as workspace_module
 from .driver import Driver
 from .judge import Judge
-from .metrics import STATUS_OK, MetricsSink
+from .metrics import STATUS_OK, MetricsSink, RunMetadata, RunMetadataSink
 
 REASON_HOST = "host"
 REASON_ENDPOINT = "endpoint"
@@ -98,28 +100,40 @@ def _parser() -> argparse.ArgumentParser:
     runner.add_argument("--exam-max-turns", type=int, default=20)
     runner.add_argument("--exam-mode", choices=exam_module.MODES, default=exam_module.MODE_AGENTIC)
     runner.add_argument(
-        "--reuse-stores", default=None,
+        "--reuse-stores",
+        default=None,
         help="replay against another run's stores; skips the experience phase entirely",
     )
     runner.add_argument(
-        "--set", action="append", default=[], metavar="SECTION.KNOB=VALUE",
+        "--set",
+        action="append",
+        default=[],
+        metavar="SECTION.KNOB=VALUE",
         help="override one config knob for every run in this matrix",
     )
     runner.add_argument("--host", default=HOST_CLAUDE_CODE, choices=sorted(DIALECTS))
     runner.add_argument(
-        "--system", default=systems.NATIVE, choices=systems.NAMES,
+        "--system",
+        default=systems.NATIVE,
+        choices=systems.NAMES,
         help="the memory system under test; memcore reads its checkout from MEMCORE_HOME",
     )
+    runner.add_argument(
+        "--observe-reads", action="store_true", help="retain bounded exam and tool evidence"
+    )
     runner.add_argument("--model", default="")
-    runner.add_argument("--judge-model", default=JUDGE_MODEL)
+    runner.add_argument("--judge-host", default=HOST_CLAUDE_CODE, choices=sorted(DIALECTS))
+    runner.add_argument("--judge-model", default="")
     runner.add_argument("--concurrency", type=int, default=4)
     runner.add_argument("--run-id", default="run")
     runner.add_argument(
-        "--manage", default="",
+        "--manage",
+        default="",
         help="label the sleep these stores went through, so the report can compare sleeps",
     )
     runner.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="keep this workspace's successful records and run only the rest",
     )
     runner.set_defaults(handler=_run)
@@ -128,7 +142,8 @@ def _parser() -> argparse.ArgumentParser:
         "regrade", help="re-judge stored answers without re-running the hosts"
     )
     regrader.add_argument("--workspace", required=True)
-    regrader.add_argument("--judge-model", default=JUDGE_MODEL)
+    regrader.add_argument("--judge-host", default=HOST_CLAUDE_CODE, choices=sorted(DIALECTS))
+    regrader.add_argument("--judge-model", default="")
     regrader.add_argument("--concurrency", type=int, default=8)
     regrader.set_defaults(handler=_regrade)
 
@@ -136,7 +151,9 @@ def _parser() -> argparse.ArgumentParser:
         "calibrate", help="check the judge against hand-labelled cases"
     )
     calibrator.add_argument("--cases", required=True)
-    calibrator.add_argument("--judge-model", default=JUDGE_MODEL)
+    calibrator.add_argument("--output", help="write calibration labels and vote evidence as JSON")
+    calibrator.add_argument("--judge-host", default=HOST_CLAUDE_CODE, choices=sorted(DIALECTS))
+    calibrator.add_argument("--judge-model", default="")
     calibrator.add_argument("--concurrency", type=int, default=8)
     calibrator.set_defaults(handler=_calibrate)
 
@@ -161,14 +178,19 @@ def _parser() -> argparse.ArgumentParser:
     sleeper.add_argument("--stores", required=True)
     sleeper.add_argument("--target", required=True)
     sleeper.add_argument(
-        "--days-later", type=float, default=0.0,
+        "--days-later",
+        type=float,
+        default=0.0,
         help="sleep as if this many days have passed, so decay and staleness can fire",
     )
     sleeper.add_argument("--reason", choices=(REASON_HOST, REASON_ENDPOINT), default=None)
     sleeper.add_argument("--reason-host", default=HOST_CLAUDE_CODE)
     sleeper.add_argument("--reason-model", default="")
     sleeper.add_argument(
-        "--set", action="append", default=[], metavar="SECTION.KNOB=VALUE",
+        "--set",
+        action="append",
+        default=[],
+        metavar="SECTION.KNOB=VALUE",
         help="override one config knob for every store this step sleeps",
     )
     sleeper.set_defaults(handler=_sleep_stores)
@@ -209,32 +231,53 @@ def _convert_locomo(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _code_revision(run=subprocess.run) -> str:
+    try:
+        completed = run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    except OSError:
+        return "unknown"
+    revision = completed.stdout.strip()
+    return revision if completed.returncode == 0 and revision else "unknown"
+
+
 def _run(args: argparse.Namespace) -> int:
-    episodes = sampling.stratified(
-        dataset.load(pathlib.Path(args.suite)), args.per_type, args.seed
-    )
+    episodes = sampling.stratified(dataset.load(pathlib.Path(args.suite)), args.per_type, args.seed)
     selected = arms_module.parse(args.arms)
     workspace = workspace_module.for_writing(args.workspace)
     sink = MetricsSink(workspace)
+    host = _host(args.host, args.model)
+    judge_host = _judge_host(args.judge_host, args.judge_model)
+    if not _available(judge_host, "judge host"):
+        return EXIT_ERROR
+    judge = Judge(judge_host)
+    if not _available(host, "tested host"):
+        return EXIT_ERROR
+
+    config = _configured(args.set)
+    RunMetadataSink(workspace).ensure(
+        RunMetadata(
+            run_id=args.run_id,
+            system=args.system,
+            host=host.name,
+            model=host.spec.model,
+            judge_model=judge.model,
+            judge_host=judge_host.name,
+            exam_mode=args.exam_mode,
+            episode_fingerprint=sampling.fingerprint(episodes),
+            reuse_stores=str(pathlib.Path(args.reuse_stores).resolve())
+            if args.reuse_stores
+            else None,
+            config=dataclasses.asdict(config),
+            code_revision=_code_revision(),
+            observe_reads=args.observe_reads,
+        ),
+        resume=args.resume,
+    )
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / QUESTIONS_FILENAME).write_text(
         json.dumps({episode.id: episode.question for episode in episodes}, sort_keys=True),
         encoding="utf-8",
     )
-    host = _host(args.host, args.model)
-    judge = Judge(
-        Host(
-            HostSpec(
-                name=HOST_CLAUDE_CODE, binary="claude",
-                model=_affordable(args.judge_model, "judge"),
-            )
-        )
-    )
-    if not host.spec.available():
-        print(json.dumps({"error": f"host binary not found: {host.spec.binary}"}), file=sys.stderr)
-        return EXIT_ERROR
-
-    config = _configured(args.set)
     driver = Driver(
         host=host,
         judge=judge,
@@ -249,6 +292,7 @@ def _run(args: argparse.Namespace) -> int:
         manage=args.manage,
         episode_fingerprint=sampling.fingerprint(episodes),
         system=systems.build(args.system, config),
+        observe_reads=args.observe_reads,
     )
     jobs = [(episode, arm) for arm in selected for episode in episodes]
     if args.resume:
@@ -335,16 +379,13 @@ def _regrade(args: argparse.Namespace) -> int:
     workspace = workspace_module.for_writing(args.workspace)
     sink = MetricsSink(workspace)
     records = sink.records()
-    judge = Judge(
-        Host(
-            HostSpec(
-                name=HOST_CLAUDE_CODE, binary="claude",
-                model=_affordable(args.judge_model, "judge"),
-            )
-        )
-    )
+    judge_host = _judge_host(args.judge_host, args.judge_model)
+    if not _available(judge_host, "judge host"):
+        return EXIT_ERROR
+    judge = Judge(judge_host)
     regraded = judge_module.regrade(records, judge, _questions(workspace), args.concurrency)
     changed = sum(1 for old, new in zip(records, regraded, strict=True) if old != new)
+    RunMetadataSink(workspace).regrade(judge_host.name, judge.model)
     sink.replace(regraded)
     print(f"regraded {len(regraded)} records, {changed} changed", file=sys.stderr)
     print(report_module.render(report_module.summarise(regraded)))
@@ -361,14 +402,10 @@ def _questions(workspace: pathlib.Path) -> dict[str, str]:
 def _calibrate(args: argparse.Namespace) -> int:
     """An instrument that has not been checked against known answers is not a measurement."""
     cases = json.loads(pathlib.Path(args.cases).read_text(encoding="utf-8"))
-    judge = Judge(
-        Host(
-            HostSpec(
-                name=HOST_CLAUDE_CODE, binary="claude",
-                model=_affordable(args.judge_model, "judge"),
-            )
-        )
-    )
+    judge_host = _judge_host(args.judge_host, args.judge_model)
+    if not _available(judge_host, "judge host"):
+        return EXIT_ERROR
+    judge = Judge(judge_host)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         verdicts = list(
             pool.map(
@@ -379,13 +416,46 @@ def _calibrate(args: argparse.Namespace) -> int:
     wrong = [
         case["case"]
         for case, verdict in zip(cases, verdicts, strict=True)
-        if verdict.correct != case["label"]
+        if verdict.ok and verdict.correct != case["label"]
     ]
-    agreed = len(cases) - len(wrong)
-    print(f"judge {args.judge_model}: {agreed}/{len(cases)} agree with the labels")
+    failed = [
+        case["case"]
+        for case, verdict in zip(cases, verdicts, strict=True)
+        if not verdict.ok or verdict.error
+    ]
+    agreed = sum(
+        verdict.ok and not verdict.error and verdict.correct == case["label"]
+        for case, verdict in zip(cases, verdicts, strict=True)
+    )
+    if args.output:
+        target = workspace_module.for_writing(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "judge_host": judge_host.name,
+                    "judge_model": judge.model,
+                    "code_revision": _code_revision(),
+                    "rubric": judge_module.RUBRIC,
+                    "agreed": agreed,
+                    "total": len(cases),
+                    "failed": failed,
+                    "cases": [
+                        {**case, "verdict": dataclasses.asdict(verdict)}
+                        for case, verdict in zip(cases, verdicts, strict=True)
+                    ],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    print(f"judge {judge_host.name}/{judge.model}: {agreed}/{len(cases)} agree with the labels")
     for name in wrong:
         print(f"  disagrees: {name}")
-    return EXIT_OK if not wrong else EXIT_ERROR
+    for name in failed:
+        print(f"  failed: {name}")
+    return EXIT_OK if not wrong and not failed else EXIT_ERROR
 
 
 def _hosts(args: argparse.Namespace) -> int:
@@ -453,6 +523,20 @@ def _affordable(model: str, role: str) -> str:
             f"set {ALLOW_COSTLY_ENV}=1 to run it deliberately"
         )
     return model
+
+
+def _available(host: Host, role: str) -> bool:
+    if host.spec.available():
+        return True
+    print(json.dumps({"error": f"{role} binary not found: {host.spec.binary}"}), file=sys.stderr)
+    return False
+
+
+def _judge_host(name: str, model: str = "") -> Host:
+    # Retain the historical Claude judge model and retry policy. The tested host
+    # never implicitly selects the judge; other dialects use their own defaults.
+    selected = model or (JUDGE_MODEL if name == HOST_CLAUDE_CODE else "")
+    return _host(name, selected, attempts=3)
 
 
 def _host(name: str, model: str = "", attempts: int = 1) -> Host:

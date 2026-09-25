@@ -10,20 +10,30 @@ import tomllib
 CONFIG_FILENAME = "config.toml"
 STORE_ENV_VAR = "AGENT_MEMORY_STORE"
 DEFAULT_STORE = "~/agent-memory-store"
+LEGACY_KNOBS = {
+    "index": frozenset({"raw_chunk_chars"}),
+    "recall": frozenset({"deep_limit_multiplier", "raw_enabled", "raw_relevance_factor"}),
+    "manage": frozenset({"raw_hit_min"}),
+}
 
 
 @dataclasses.dataclass
 class StorageConfig:
-    domains: tuple[str, ...] = ("user", "project", "reference", "experience")
-    domain_types: dict[str, tuple[str, ...]] = dataclasses.field(
+    schemas_dirname: str = "schemas"
+    max_depth: int = 3
+    field_sources: dict[str, str] = dataclasses.field(
         default_factory=lambda: {
-            "user": ("fact", "preference"),
-            "project": ("fact", "decision", "procedure"),
-            "reference": ("reference",),
-            "experience": ("experience", "procedure"),
+            "project": "system",
+            "user": "system",
+            "date": "system",
+            "topic": "menu",
+            "category": "menu",
+            "source": "menu",
         }
     )
-    max_depth_below_domain: int = 1
+    default_group: str = "general"
+    default_project: str = "default"
+    default_user: str = "default"
     slug_max_length: int = 80
     abstract_max_chars: int = 240
     archive_sessions_enabled: bool = True
@@ -35,9 +45,10 @@ class StorageConfig:
 class IndexConfig:
     hash_prefix_length: int = 16
     chunk_min_chars: int = 200
-    raw_chunk_chars: int = 1200
     bm25_abstract_weight: float = 2.0
     bm25_body_weight: float = 1.0
+    vector_enabled: bool = False
+    vector_model: str = "BAAI/bge-small-en-v1.5"
 
 
 @dataclasses.dataclass
@@ -55,21 +66,16 @@ class WeightConfig:
     boost_step: float = 0.5
     decay_step: float = 0.1
     decay_after_days: float = 30.0
-    demote_penalty: float = 0.5
 
 
 @dataclasses.dataclass
 class RecallConfig:
     default_limit: int = 8
     candidate_pool_multiplier: int = 10
-    deep_limit_multiplier: int = 2
     recency_half_life_days: float = 180.0
     recency_decay_base: float = 0.5
     recency_floor: float = 0.25
-    retrieval_weight_floor: float = 0.15
     memory_md_weight_floor: float = 0.75
-    raw_enabled: bool = True
-    raw_relevance_factor: float = 0.4
     synthesis_hint: bool = True
     context_full_text_entries: int = 4
     injection_enabled: bool = True
@@ -78,23 +84,22 @@ class RecallConfig:
     snippet_max_chars: int = 400
 
 
-TIER_UNATTENDED = "T0"
-TIER_PROPOSAL = "T1"
-TIER_HUMAN = "T2"
-
-
 @dataclasses.dataclass
 class ManageConfig:
-    authority: str = TIER_UNATTENDED
     trigger_min_hours: float = 24.0
     trigger_min_sessions: int = 3
     cluster_min_files: int = 5
     cluster_min_shared_tokens: int = 2
-    stale_after_days: float = 365.0
     merge_proposal_similarity: float = 0.75
     link_cooccurrence_min: int = 2
     abstract_min_words: int = 3
     max_boosts_per_sleep: int = 3
+    max_merges_per_sleep: int = 3
+    max_supersedes_per_sleep: int = 5
+    max_splits_per_sleep: int = 2
+    max_deletes_per_sleep: int = 3
+    split_min_sections: int = 3
+    git_commit: bool = True
     dream_report_dirname: str = "dream-reports"
 
 
@@ -104,6 +109,30 @@ class WriteConfig:
     session_archive_enabled: bool = True
     hook_timeout_seconds: float = 20.0
     batch_hint: bool = True
+    max_distill_input_chars: int = 24000
+    reconcile_entries: int = 8
+    reconcile_query_chars: int = 2000
+    repair_rounds: int = 1
+    pending_dirname: str = "pending"
+    pending_message_threshold: int = 20
+    pending_token_threshold: int = 4000
+    chars_per_token: int = 4
+    idle_seconds: float = 900.0
+    distill_on_boundary: bool = True
+    slot_table: bool = True
+    event_lane: bool = True
+    max_rounds: int = 3
+    tool_result_chars: int = 4000
+
+
+@dataclasses.dataclass
+class ExecutorConfig:
+    model: str = "google/gemini-3.7-flash"
+    endpoint: str = ""
+    project: str = "tigerless-seo"
+    location: str = "global"
+    timeout_seconds: float = 120.0
+    command: str = "mem distill"
 
 
 @dataclasses.dataclass
@@ -115,6 +144,7 @@ class Config:
     recall: RecallConfig = dataclasses.field(default_factory=RecallConfig)
     manage: ManageConfig = dataclasses.field(default_factory=ManageConfig)
     write: WriteConfig = dataclasses.field(default_factory=WriteConfig)
+    executor: ExecutorConfig = dataclasses.field(default_factory=ExecutorConfig)
 
     @classmethod
     def default(cls) -> Config:
@@ -133,10 +163,19 @@ class Config:
                 raise ValueError(f"unknown config section: {section_name}")
             known = {field.name for field in dataclasses.fields(section)}
             for key, value in values.items():
+                if key in LEGACY_KNOBS.get(section_name, ()):
+                    continue
                 if key not in known:
                     raise ValueError(f"unknown config knob: {section_name}.{key}")
                 setattr(section, key, value)
+        config.validate_index()
         return config
+
+    def validate_index(self) -> None:
+        if not isinstance(self.index.vector_enabled, bool):
+            raise ValueError("index.vector_enabled must be a boolean")
+        if not isinstance(self.index.vector_model, str) or not self.index.vector_model.strip():
+            raise ValueError("index.vector_model must be a non-empty string")
 
     def save(self, store_root: pathlib.Path) -> pathlib.Path:
         path = pathlib.Path(store_root) / CONFIG_FILENAME
@@ -158,12 +197,18 @@ class Config:
 
         payload = json.dumps(
             {
-                "index": dataclasses.asdict(self.index),
+                "index": self._index_knobs_shaping_recall(),
                 "recall": dataclasses.asdict(self.recall),
             },
             sort_keys=True,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[: self.index.hash_prefix_length]
+
+    def _index_knobs_shaping_recall(self) -> dict[str, object]:
+        knobs = dataclasses.asdict(self.index)
+        if not self.index.vector_enabled:
+            del knobs["vector_enabled"], knobs["vector_model"]
+        return knobs
 
 
 def resolve_store_root(explicit: str | pathlib.Path | None = None) -> pathlib.Path:

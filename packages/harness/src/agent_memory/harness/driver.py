@@ -9,13 +9,18 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import pathlib
+import time
+import uuid
 
+from agent_memory.core import observation
 from agent_memory.core.config import Config
+from agent_memory.core.distill import Ask
+from agent_memory.executor import distiller
 from agent_memory.executor.hosts import Host
 
 from . import exam as exam_module
 from . import framing
-from .arms import MODE_NONE, Arm
+from .arms import MODE_COLD, MODE_NONE, Arm
 from .dataset import Episode, Session
 from .judge import Judge
 from .metrics import STATUS_FAILED, STATUS_OK, RunRecord
@@ -50,7 +55,10 @@ class Driver:
         exam_mode: str = exam_module.MODE_AGENTIC,
         manage: str = "",
         system: MemorySystem | None = None,
+        ask: Ask | None = None,
+        observe_reads: bool = False,
     ):
+        self._observe_reads = observe_reads
         self._host = host
         self._judge = judge
         self._workspace = workspace
@@ -63,6 +71,7 @@ class Driver:
         self._exam_mode = exam_mode
         self._manage = manage
         self._system = system or NativeSystem(config)
+        self._ask = ask or distiller.distiller((config or Config.default()).executor)
         if exam_mode == exam_module.MODE_FIXED and not self._system.supports_fixed_exam:
             raise ValueError(
                 f"the fixed exam needs a harness-side context builder, "
@@ -93,6 +102,23 @@ class Driver:
         elif arm.memory:
             exam_prompt = framing.with_injected(exam_prompt, self._system.injection(root))
 
+        environment = self._system.environment(root) if arm.memory else {}
+        environment = {**environment, observation.ENV: "", observation.ATTEMPT_ENV: ""}
+        evidence_dir = None
+        if self._observe_reads:
+            evidence_dir = (
+                self._workspace.parent / "observations" / arm.name / episode.id / uuid.uuid4().hex
+            ).resolve()
+            observation.emit(
+                "exam_start",
+                directory=str(evidence_dir),
+                run_id=self._run_id,
+                episode_id=episode.id,
+                arm=arm.name,
+                host=self._host.name,
+                exam_mode=self._exam_mode,
+            )
+            environment[observation.ENV] = str(evidence_dir)
         answer = self._host.run(
             exam_prompt,
             store_root=root if arm.memory else None,
@@ -100,9 +126,11 @@ class Driver:
             system_prompt=self._exam_system_prompt(arm.memory, fixed),
             max_turns=self._exam_max_turns,
             workdir=workdir,
-            environment=self._system.environment(root) if arm.memory else None,
+            environment=environment,
             tool_pattern=self._system.tool_pattern,
         )
+        if evidence_dir:
+            observation.emit("exam_end", directory=str(evidence_dir), ok=answer.ok)
         if arm.memory:
             self._system.release(root)
         verdict = self._judge.grade(episode.question, episode.answer, answer.text)
@@ -115,8 +143,8 @@ class Driver:
             question_type=episode.question_type,
             status=status,
             correct=bool(verdict.correct and status == STATUS_OK),
-            answer=answer.text[:ANSWER_EXCERPT],
-            expected=episode.answer[:ANSWER_EXCERPT],
+            answer=answer.text,
+            expected=episode.answer,
             memories_written=self._system.record_count(root) if arm.memory else 0,
             experience_calls=phase.calls,
             experience_seconds=round(phase.seconds, SECONDS_PRECISION),
@@ -125,9 +153,11 @@ class Driver:
             judge_seconds=round(verdict.seconds, SECONDS_PRECISION),
             recall_fingerprint=self._system.fingerprint(),
             episode_fingerprint=self._episode_fingerprint,
-            error=answer.error,
+            error=answer.error or (verdict.error if not verdict.ok else ""),
             manage=self._manage,
             system=self._system.name,
+            observation_revision=observation.REVISION if evidence_dir else "",
+            observation_path=str(evidence_dir) if evidence_dir else "",
         )
 
     def _exam_system_prompt(self, with_memory: bool, fixed: bool) -> str:
@@ -154,6 +184,8 @@ class Driver:
             return ExperiencePhase(calls=0, seconds=0.0, blocking_seconds=0.0, failures=0)
 
         batches = list(_batched(list(episode.sessions), self._batch))
+        if arm.mode == MODE_COLD:
+            return self._cold(root, episode, batches)
         for index, batch in enumerate(batches):
             self._system.archive(root, f"{episode.id}-{index}", _render(batch))
 
@@ -187,6 +219,25 @@ class Driver:
             seconds=seconds,
             blocking_seconds=seconds if arm.blocking else 0.0,
             failures=len([result for result in results if not result.ok]),
+        )
+
+    def _cold(self, root: pathlib.Path, episode: Episode, batches: list) -> ExperiencePhase:
+        """W3: the archive is the input and the library's executor is the writer; the host
+        is never asked."""
+        started = time.monotonic()
+        failures = 0
+        for index, batch in enumerate(batches):
+            messages = [message for session in batch for message in session.messages()]
+            try:
+                self._system.distill(root, f"{episode.id}-{index}", messages, self._ask)
+            except Exception:
+                failures += 1
+        self._system.release(root)
+        return ExperiencePhase(
+            calls=len(batches),
+            seconds=time.monotonic() - started,
+            blocking_seconds=0.0,
+            failures=failures,
         )
 
     def _assert_isolated(self, prompt: str, episode: Episode) -> None:
