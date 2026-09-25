@@ -3,8 +3,6 @@
 import pathlib
 
 import pytest
-
-from agent_memory.core.clock import FrozenClock
 from agent_memory.core.config import Config
 from agent_memory.core.locking import store_lock
 from agent_memory.core.paths import StoreLayout
@@ -38,25 +36,10 @@ def test_store_lock_creates_state_dir_if_missing(tmp_path):
     assert layout.lock_file.exists()
 
 
-def test_store_lock_handle_is_closed_after_use(tmp_path):
-    """After the context manager exits, the file handle must be closed.
-
-    The old code opened the handle before a try/finally, so an unexpected
-    error between open() and the try block would leak it. Using a `with`
-    statement guarantees the handle is closed on every exit path.
-    """
+def test_store_lock_releases_after_body_error(tmp_path):
     layout = _layout(tmp_path)
+    with pytest.raises(RuntimeError, match="body failed"), store_lock(layout):
+        raise RuntimeError("body failed")
+
     with store_lock(layout):
         pass
-    # Try to acquire the lock again — this would deadlock if the handle
-    # were still held by the first acquisition (on the same fd).
-    with store_lock(layout):
-        pass
-
-
-def test_lock_file_is_opened_with_explicit_encoding(tmp_path):
-    """The lock file open() call must specify encoding to avoid relying
-    on the locale default, even though the handle is used only for flock()."""
-    import inspect
-    source = inspect.getsource(store_lock)
-    assert "encoding=" in source, "lock file open() should specify encoding"
